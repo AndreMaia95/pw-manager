@@ -79,14 +79,12 @@ pub(crate) fn open(
 }
 
 pub(crate) fn encode_body(body: &ReplicaBody) -> Zeroizing<Vec<u8>> {
-    let mut plaintext = Zeroizing::new(Vec::new());
-    ciborium::into_writer(body, &mut *plaintext).expect("escrever CBOR para um Vec não falha");
-    plaintext
+    cbor::encode(body)
 }
 
-/// O corpo decifrado da réplica, em CBOR.
+/// O corpo decifrado da réplica, em CBOR na codificação canónica (ADR-0008).
 pub(crate) fn decode_body(plaintext: &[u8]) -> Result<ReplicaBody, VaultError> {
-    cbor::decode_exact(plaintext).ok_or(VaultError::ReplicaRejected)
+    cbor::decode_canonical(plaintext).ok_or(VaultError::ReplicaRejected)
 }
 
 fn encode_header(owner: &ReplicaOwner, nonce: &[u8; NONCE_LEN]) -> [u8; HEADER_LEN] {

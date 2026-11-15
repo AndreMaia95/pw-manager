@@ -46,6 +46,11 @@ pub fn keyring(data: &[u8]) {
         Keyring::decode(&[data, &[0]].concat()).is_err(),
         "aceitou bytes a mais depois do corpo"
     );
+    assert_eq!(
+        keyring.encode(),
+        data,
+        "aceitou um chaveiro fora da codificação canónica"
+    );
 
     // Sem calcular o Argon2id e o Poly1305, ninguém faz um invólucro que abra
     // com esta palavra-passe. Só com parâmetros baratos, para o fuzzing não ficar
@@ -93,12 +98,18 @@ pub fn replica(data: &[u8]) {
     assert_eq!(replica::open(&sealed, &owner, &vault_key), expected);
 }
 
-/// O descodificador CBOR do corpo decifrado da réplica: o que aceita volta a
-/// ler-se igual depois de escrito, e não aceita bytes a mais.
+/// O descodificador CBOR do corpo decifrado da réplica: só aceita a codificação
+/// canónica (o que aceita é exatamente o que se escreve para o valor lido), o
+/// que escreve volta a ler-se igual, e não aceita bytes a mais.
 pub fn replica_body(data: &[u8]) {
     let Ok(body) = replica::decode_body(data) else {
         return;
     };
+    assert_eq!(
+        *replica::encode_body(&body),
+        *data,
+        "aceitou um corpo fora da codificação canónica"
+    );
     assert_eq!(
         replica::decode_body(&replica::encode_body(&body)),
         Ok(body),

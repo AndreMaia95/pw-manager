@@ -20,6 +20,12 @@
 //! cifrado com a chave do cofre, porque é dele que a chave do cofre sai; por isso
 //! o corpo fica em claro e o nonce vai em cada invólucro. A integridade do
 //! chaveiro inteiro chega com a assinatura do dispositivo (ticket 10).
+//!
+//! Até lá, e depois dela, o leitor só aceita a codificação canónica (ADR-0008):
+//! volta a codificar o cabeçalho e o corpo que leu e rejeita o chaveiro se os
+//! bytes não forem exatamente os mesmos. Assim nenhum bit do corpo, que não é
+//! autenticado por inteiro, pode mudar sem que o chaveiro seja rejeitado ou o
+//! invólucro deixe de abrir.
 
 use serde::{Deserialize, Serialize};
 
@@ -97,7 +103,7 @@ impl Keyring {
         master_password: &str,
         kdf: KdfParams,
     ) -> Result<Vec<u8>, VaultError> {
-        let header_bytes = encode_header(vault_id, writer, generation);
+        let header_bytes = encode_header(FORMAT_MINOR, vault_id, writer, generation);
         let salt: [u8; SALT_LEN] = crypto::random_bytes()?;
         let nonce: [u8; NONCE_LEN] = crypto::random_bytes()?;
         let envelope_key = kdf
@@ -117,9 +123,7 @@ impl Keyring {
                 ciphertext,
             },
         };
-        let mut bytes = header_bytes.to_vec();
-        ciborium::into_writer(&body, &mut bytes).expect("escrever CBOR para um Vec não falha");
-        Ok(bytes)
+        Ok([header_bytes.as_slice(), &cbor::encode(&body)].concat())
     }
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, VaultError> {
@@ -128,17 +132,24 @@ impl Keyring {
             .ok_or(VaultError::KeyringRejected)?;
         let (magic, rest) = header.split_first_chunk::<4>().unwrap();
         let (major, rest) = rest.split_first_chunk::<2>().unwrap();
-        let (_minor, rest) = rest.split_first_chunk::<2>().unwrap();
+        let (minor, rest) = rest.split_first_chunk::<2>().unwrap();
         let (vault_id, rest) = rest.split_first_chunk::<ID_LEN>().unwrap();
-        let (_writer, rest) = rest.split_first_chunk::<ID_LEN>().unwrap();
+        let (writer, rest) = rest.split_first_chunk::<ID_LEN>().unwrap();
         let generation = u64::from_be_bytes(*rest.first_chunk::<8>().unwrap());
         if *magic != MAGIC || u16::from_be_bytes(*major) != FORMAT_MAJOR {
             return Err(VaultError::KeyringRejected);
         }
-        let body: KeyringBody = cbor::decode_exact(body).ok_or(VaultError::KeyringRejected)?;
+        let (vault_id, writer) = (Id(*vault_id), Id(*writer));
+        // Os campos do cabeçalho têm largura fixa, por isso hoje isto só falha se
+        // o cabeçalho deixar de ser o que `encode_header` escreve; fica a regra
+        // para quando o cabeçalho evoluir.
+        if encode_header(u16::from_be_bytes(*minor), vault_id, writer, generation) != *header {
+            return Err(VaultError::KeyringRejected);
+        }
+        let body: KeyringBody = cbor::decode_canonical(body).ok_or(VaultError::KeyringRejected)?;
         Ok(Self {
             header_bytes: *header,
-            vault_id: Id(*vault_id),
+            vault_id,
             generation,
             body,
         })
@@ -150,6 +161,12 @@ impl Keyring {
 
     pub(crate) fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// O chaveiro escrito de novo a partir do que foi lido.
+    #[cfg(feature = "fuzzing")]
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        [self.header_bytes.as_slice(), &cbor::encode(&self.body)].concat()
     }
 
     /// Os parâmetros do Argon2id do invólucro da palavra-passe mestra, como
@@ -191,12 +208,17 @@ impl Keyring {
     }
 }
 
-fn encode_header(vault_id: VaultId, writer: DeviceId, generation: u64) -> [u8; HEADER_LEN] {
+fn encode_header(
+    minor: u16,
+    vault_id: VaultId,
+    writer: DeviceId,
+    generation: u64,
+) -> [u8; HEADER_LEN] {
     let mut header = [0u8; HEADER_LEN];
     let fields: [&[u8]; 6] = [
         &MAGIC,
         &FORMAT_MAJOR.to_be_bytes(),
-        &FORMAT_MINOR.to_be_bytes(),
+        &minor.to_be_bytes(),
         &vault_id.0,
         &writer.0,
         &generation.to_be_bytes(),

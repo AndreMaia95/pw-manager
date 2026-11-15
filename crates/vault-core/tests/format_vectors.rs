@@ -82,15 +82,15 @@ fn every_format_vector_in_the_repository_is_checked() {
 }
 
 /// Nenhum bit de um vetor pode mudar sem que o desbloqueio com a palavra-passe
-/// mestra certa falhe ou dê o mesmo estado.
+/// mestra certa falhe.
 ///
-/// A réplica é autenticada por inteiro: qualquer bit alterado faz falhar. O corpo
-/// do chaveiro não (ADR-0008; a assinatura do chaveiro chega no ticket 10), por
-/// isso uma alteração sem significado, como uma chave do mapa CBOR escrita em
-/// bytes em vez de texto, ainda abre; mas tem de dar a mesma chave do cofre, ou a
-/// réplica não abriria, e o mesmo estado.
+/// A réplica é autenticada por inteiro. O corpo do chaveiro não (ADR-0008; a
+/// assinatura do chaveiro chega no ticket 10), mas o leitor só aceita a
+/// codificação canónica: uma alteração sem significado, como uma chave do mapa
+/// CBOR escrita em bytes em vez de texto, é rejeitada; qualquer outra muda o
+/// cabeçalho autenticado, os parâmetros do Argon2id ou o próprio invólucro.
 #[test]
-fn a_format_vector_with_any_bit_flipped_fails_to_unlock_or_gives_the_same_state() {
+fn a_format_vector_with_any_bit_flipped_fails_to_unlock() {
     for vector in VECTORS {
         let path = vector.path;
         let expected = &vector.expected;
@@ -98,25 +98,20 @@ fn a_format_vector_with_any_bit_flipped_fails_to_unlock_or_gives_the_same_state(
         let keyring = folder.keyring().unwrap();
         let replica = folder.replica(expected.device_id).unwrap();
 
-        for tampered in every_bit_flip(&keyring) {
+        for (bit, tampered) in every_bit_flip(&keyring) {
             folder.put_keyring(tampered);
-            if let Ok(vault) = unlock(&folder, vector) {
-                assert_eq!(
-                    vault.vault_id(),
-                    expected.vault_id,
-                    "{path}: chaveiro alterado"
-                );
-                assert_eq!(
-                    vault.created_at_ms(),
-                    Ok(expected.created_at_ms),
-                    "{path}: chaveiro alterado"
-                );
-            }
+            assert!(
+                unlock(&folder, vector).is_err(),
+                "{path}: chaveiro com o bit {bit} trocado"
+            );
         }
         folder.put_keyring(keyring);
-        for tampered in every_bit_flip(&replica) {
+        for (bit, tampered) in every_bit_flip(&replica) {
             folder.put_replica(expected.device_id, tampered);
-            assert!(unlock(&folder, vector).is_err(), "{path}: réplica alterada");
+            assert!(
+                unlock(&folder, vector).is_err(),
+                "{path}: réplica com o bit {bit} trocado"
+            );
         }
         folder.put_replica(expected.device_id, replica);
         assert!(unlock(&folder, vector).is_ok(), "{path}: original");
@@ -133,10 +128,10 @@ fn unlock(folder: &MemoryVaultFolder, vector: &FormatVector) -> Result<Vault, Va
     Ok(vault)
 }
 
-fn every_bit_flip(bytes: &[u8]) -> impl Iterator<Item = Vec<u8>> {
+fn every_bit_flip(bytes: &[u8]) -> impl Iterator<Item = (usize, Vec<u8>)> {
     (0..bytes.len() * 8).map(|bit| {
         let mut flipped = bytes.to_vec();
         flipped[bit / 8] ^= 1 << (bit % 8);
-        flipped
+        (bit, flipped)
     })
 }

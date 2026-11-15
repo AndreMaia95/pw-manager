@@ -11,5 +11,5 @@
 - [ ] Editar uma entrada atualiza os campos
 - [ ] A listagem nunca inclui palavra-passe nem notas
 - [ ] Revelar devolve só o campo pedido de uma entrada; notas tratadas exatamente como a palavra-passe
-- [ ] Campos CBOR desconhecidos numa entrada são preservados depois de editar e gravar
+- [ ] Campos CBOR desconhecidos numa entrada são preservados depois de editar e gravar, escritos de novo exatamente como vieram, para passarem a verificação da codificação canónica (ADR-0008; hoje um campo desconhecido é rejeitado)
 - [ ] Uma réplica com versão principal do formato mais recente faz o cofre recusar escrever e pedir atualização
