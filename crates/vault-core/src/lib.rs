@@ -4,9 +4,12 @@
 //! erro) para poder ser exposta via UniFFI mais tarde (ADR-0011). Nenhum tipo do
 //! Tauri atravessa esta fronteira.
 
+mod cbor;
 mod clock;
 mod crypto;
 mod error;
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing;
 mod ids;
 mod kdf;
 mod keyring;

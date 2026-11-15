@@ -1,0 +1,37 @@
+[package]
+name = "vault-core-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+vault-core = { path = "..", features = ["fuzzing"] }
+
+# Fora do workspace da raiz: só compila com o cargo-fuzz, em nightly.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "keyring"
+path = "fuzz_targets/keyring.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "replica"
+path = "fuzz_targets/replica.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "replica_body"
+path = "fuzz_targets/replica_body.rs"
+test = false
+doc = false
+bench = false

@@ -1,7 +1,9 @@
 mod common;
 
-use common::{PASSWORD, TestEnv};
-use vault_core::VaultError;
+use common::{PASSWORD, START_MS, TestEnv};
+use std::sync::Arc;
+
+use vault_core::{Vault, VaultError};
 
 #[test]
 fn creating_a_vault_writes_a_keyring_and_this_devices_replica_to_the_vault_folder() {
@@ -99,4 +101,32 @@ fn a_replica_with_any_header_byte_changed_is_rejected() {
     env.folder.put_replica(&device_id, original);
     let vault = device.open_vault(&device_id);
     assert_eq!(vault.unlock_with_master_password(PASSWORD), Ok(()));
+}
+
+#[test]
+fn a_keyring_with_bytes_after_its_body_is_rejected() {
+    let env = TestEnv::new();
+    let device = env.device();
+    let device_id = device.create_vault(PASSWORD).device_id();
+    let mut keyring = env.folder.keyring().unwrap();
+    keyring.push(0x00);
+    env.folder.put_keyring(keyring);
+
+    let vault = Vault::open(Arc::new(env.folder.clone()), &device_id);
+
+    assert_eq!(vault.err(), Some(VaultError::KeyringRejected));
+}
+
+#[test]
+fn the_vault_remembers_when_it_was_created() {
+    let env = TestEnv::new();
+    let device = env.device();
+    let vault = device.create_vault(PASSWORD);
+    device.clock.advance(60_000);
+
+    assert_eq!(vault.created_at_ms(), Ok(START_MS));
+    vault.lock();
+    assert_eq!(vault.created_at_ms(), Err(VaultError::Locked));
+    assert_eq!(vault.unlock_with_master_password(PASSWORD), Ok(()));
+    assert_eq!(vault.created_at_ms(), Ok(START_MS));
 }

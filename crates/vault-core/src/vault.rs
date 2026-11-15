@@ -121,6 +121,13 @@ impl Vault {
         self.vault_id.to_string()
     }
 
+    /// Quando o cofre foi criado, em milissegundos desde 1970-01-01T00:00:00Z.
+    pub fn created_at_ms(&self) -> Result<i64, VaultError> {
+        let session = self.session();
+        let session = session.as_ref().ok_or(VaultError::Locked)?;
+        Ok(session.body.created_at_ms)
+    }
+
     /// Cifra o estado atual e escreve a réplica deste dispositivo na pasta do cofre.
     pub fn save_replica(&self) -> Result<(), VaultError> {
         let session = self.session();

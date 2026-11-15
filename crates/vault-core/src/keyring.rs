@@ -23,6 +23,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::cbor;
 use crate::crypto::{self, KEY_LEN, NONCE_LEN, SecretKey};
 use crate::ids::{DeviceId, ID_LEN, Id, VaultId};
 use crate::{KdfParams, VaultError};
@@ -134,8 +135,7 @@ impl Keyring {
         if *magic != MAGIC || u16::from_be_bytes(*major) != FORMAT_MAJOR {
             return Err(VaultError::KeyringRejected);
         }
-        let body: KeyringBody =
-            ciborium::from_reader(body).map_err(|_| VaultError::KeyringRejected)?;
+        let body: KeyringBody = cbor::decode_exact(body).ok_or(VaultError::KeyringRejected)?;
         Ok(Self {
             header_bytes: *header,
             vault_id: Id(*vault_id),
@@ -150,6 +150,13 @@ impl Keyring {
 
     pub(crate) fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Os parâmetros do Argon2id do invólucro da palavra-passe mestra, como
+    /// estão no ficheiro (podem ser inválidos).
+    #[cfg(feature = "fuzzing")]
+    pub(crate) fn master_password_kdf(&self) -> KdfParams {
+        KdfParams::from(&self.body.master_password.kdf)
     }
 
     /// Desembrulha a chave do cofre. Qualquer falha dá o mesmo erro, para não

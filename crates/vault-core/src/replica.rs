@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::VaultError;
+use crate::cbor;
 use crate::crypto::{self, NONCE_LEN, SecretKey};
 use crate::ids::{DeviceId, ID_LEN, Id, VaultId};
 
@@ -22,7 +23,7 @@ const FORMAT_MINOR: u16 = 0;
 const HEADER_LEN: usize = 4 + 2 + 2 + ID_LEN + ID_LEN + 8 + NONCE_LEN;
 
 /// O estado do cofre que este dispositivo conhece.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ReplicaBody {
     pub(crate) created_at_ms: i64,
 }
@@ -41,8 +42,7 @@ pub(crate) fn seal(
 ) -> Result<Vec<u8>, VaultError> {
     let nonce: [u8; NONCE_LEN] = crypto::random_bytes()?;
     let header = encode_header(owner, &nonce);
-    let mut plaintext = Zeroizing::new(Vec::new());
-    ciborium::into_writer(body, &mut *plaintext).expect("escrever CBOR para um Vec não falha");
+    let plaintext = encode_body(body);
     let ciphertext = crypto::seal(vault_key, &nonce, &header, &plaintext);
     Ok([header.as_slice(), &ciphertext].concat())
 }
@@ -75,7 +75,18 @@ pub(crate) fn open(
     }
     let plaintext =
         crypto::open(vault_key, nonce, header, ciphertext).ok_or(VaultError::ReplicaRejected)?;
-    ciborium::from_reader(plaintext.as_slice()).map_err(|_| VaultError::ReplicaRejected)
+    decode_body(&plaintext)
+}
+
+pub(crate) fn encode_body(body: &ReplicaBody) -> Zeroizing<Vec<u8>> {
+    let mut plaintext = Zeroizing::new(Vec::new());
+    ciborium::into_writer(body, &mut *plaintext).expect("escrever CBOR para um Vec não falha");
+    plaintext
+}
+
+/// O corpo decifrado da réplica, em CBOR.
+pub(crate) fn decode_body(plaintext: &[u8]) -> Result<ReplicaBody, VaultError> {
+    cbor::decode_exact(plaintext).ok_or(VaultError::ReplicaRejected)
 }
 
 fn encode_header(owner: &ReplicaOwner, nonce: &[u8; NONCE_LEN]) -> [u8; HEADER_LEN] {

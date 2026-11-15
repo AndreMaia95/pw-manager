@@ -19,6 +19,11 @@ zeroize = "1.9.1"
 # Duplos de teste (pasta do cofre em memória, relógio manual, Argon2id leve).
 # Nunca ativar em produção.
 testing = []
+# Alvos de fuzzing do leitor (`fuzz/`, `tests/fuzz_harnesses.rs`). Nunca ativar
+# em produção.
+fuzzing = []
 
 [dev-dependencies]
-vault-core = { path = ".", features = ["testing"] }
+libsodium-sys-stable = "1.24.6"
+proptest = "1.12.0"
+vault-core = { path = ".", features = ["testing", "fuzzing"] }
