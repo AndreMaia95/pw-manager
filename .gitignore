@@ -1,0 +1,37 @@
+# --- Segredos ---
+.env
+.env.*
+!.env.example
+*.vault
+*.vault.*
+*.pem
+*.key
+
+# --- SO / editores ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# --- Node ---
+node_modules/
+dist/
+build/
+coverage/
+npm-debug.log*
+yarn-error.log*
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# --- Logs / temporários ---
+*.log
+tmp/
