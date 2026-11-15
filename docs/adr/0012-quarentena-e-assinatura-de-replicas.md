@@ -11,3 +11,4 @@ Quem obtém a chave do cofre não só lê como pode escrever uma réplica com en
 - A chave de recuperação dá mais poder do que a palavra-passe mestra: deve ser guardada como tal.
 - Uma entrada com a chave de recuperação gera um alerta persistente nos outros dispositivos conhecidos ("o dispositivo X entrou com a chave de recuperação em <data>").
 - O fluxo de recuperação funde as réplicas antigas antes de propor removê-las; marcar um dispositivo antigo como roubado (e não apenas perdido) propõe de seguida a rotação da chave do cofre.
+- A chave privada Ed25519 de cada dispositivo fica num ficheiro local, cifrada com a chave do cofre, e nunca vai para a pasta do cofre. Quem tenha a pasta do cofre e a chave do cofre não consegue fazer-se passar por um dispositivo conhecido.

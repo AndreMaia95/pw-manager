@@ -8,3 +8,5 @@ Alterar a palavra-passe mestra só reescreve um invólucro, o que não protege c
 
 - Réplicas, chaveiros e cópias de segurança antigas continuam legíveis com a palavra-passe antiga; só contêm dados até ao momento da rotação. O assistente de rotação avisa que esses segredos devem ser alterados nos próprios sites.
 - Detecção de comprometimento: lista de dispositivos conhecidos com alerta para réplicas desconhecidas, e registo de desbloqueios. O registo não deteta ataques offline a ficheiros copiados.
+- O chaveiro é assinado pelo dispositivo conhecido que o escreveu; um chaveiro mal assinado ou de um dispositivo não conhecido é rejeitado com alerta. Sem isto, quem tivesse a chave do cofre poderia substituir os invólucros e trancar o utilizador fora.
+- O chaveiro guarda as chaves do cofre anteriores, cifradas com a atual, para que um dispositivo offline durante uma rotação consiga ler a sua réplica antiga depois de desbloquear com a nova palavra-passe. Quem só tem a chave antiga continua sem ler dados novos.
