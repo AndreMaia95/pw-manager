@@ -10,9 +10,10 @@
 //! corpo em CBOR, em claro, com os invólucros
 //! ```
 //!
-//! Cada invólucro tem o seu próprio nonce e autentica o cabeçalho inteiro como
-//! AAD, por isso alterar o cabeçalho (ou trocar um invólucro entre cofres ou
-//! gerações) impede o desbloqueio.
+//! Cada invólucro tem o seu próprio nonce. O seu AAD é o cabeçalho inteiro (com
+//! o id do cofre e a geração) seguido do tipo de método de desbloqueio, por isso
+//! um invólucro não pode ser trocado para outro cofre, reposto sob outra geração
+//! nem usado como invólucro de outro método.
 //!
 //! _Difere do ADR-0008_, que descreve o mesmo cabeçalho com nonce e corpo
 //! cifrado para a réplica e para o chaveiro. O chaveiro não pode ter o corpo
@@ -31,7 +32,7 @@ const FORMAT_MAJOR: u16 = 1;
 const FORMAT_MINOR: u16 = 0;
 const HEADER_LEN: usize = 4 + 2 + 2 + ID_LEN + ID_LEN + 8;
 const SALT_LEN: usize = 16;
-/// Separa o AAD do invólucro da palavra-passe mestra do de outros invólucros.
+/// O tipo de método de desbloqueio no AAD: separa este invólucro dos de outros métodos.
 const MASTER_PASSWORD_AAD_LABEL: &[u8] = b"pw-manager/envelope/master-password";
 
 pub(crate) struct Keyring {
@@ -98,11 +99,11 @@ impl Keyring {
         let header_bytes = encode_header(vault_id, writer, generation);
         let salt: [u8; SALT_LEN] = crypto::random_bytes()?;
         let nonce: [u8; NONCE_LEN] = crypto::random_bytes()?;
-        let wrapping_key = kdf
+        let envelope_key = kdf
             .derive_key(master_password, &salt)
             .ok_or(VaultError::InvalidKdfParams)?;
         let ciphertext = crypto::seal(
-            &wrapping_key,
+            &envelope_key,
             &nonce,
             &master_password_aad(&header_bytes),
             vault_key.as_ref(),
@@ -153,7 +154,7 @@ impl Keyring {
 
     /// Desembrulha a chave do cofre. Qualquer falha dá o mesmo erro, para não
     /// revelar se foi a palavra-passe ou o invólucro.
-    pub(crate) fn unwrap_with_master_password(
+    pub(crate) fn open_master_password_envelope(
         &self,
         master_password: &str,
     ) -> Result<SecretKey, VaultError> {
@@ -164,11 +165,11 @@ impl Keyring {
             .as_slice()
             .try_into()
             .map_err(|_| VaultError::UnlockFailed)?;
-        let wrapping_key = kdf
+        let envelope_key = kdf
             .derive_key(master_password, &envelope.salt)
             .ok_or(VaultError::UnlockFailed)?;
         let plaintext = crypto::open(
-            &wrapping_key,
+            &envelope_key,
             nonce,
             &master_password_aad(&self.header_bytes),
             &envelope.ciphertext,
@@ -201,6 +202,8 @@ fn encode_header(vault_id: VaultId, writer: DeviceId, generation: u64) -> [u8; H
     header
 }
 
+/// AAD do invólucro da palavra-passe mestra: cabeçalho (id do cofre, geração,
+/// …) + tipo de método de desbloqueio.
 fn master_password_aad(header: &[u8; HEADER_LEN]) -> Vec<u8> {
     [header.as_slice(), MASTER_PASSWORD_AAD_LABEL].concat()
 }

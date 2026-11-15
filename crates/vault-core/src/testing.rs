@@ -31,6 +31,11 @@ impl MemoryVaultFolder {
         self.files().keyring.clone()
     }
 
+    /// Substitui o chaveiro por bytes arbitrários, p. ex. para simular adulteração.
+    pub fn put_keyring(&self, bytes: Vec<u8>) {
+        self.files().keyring = Some(bytes);
+    }
+
     /// Os ids dos dispositivos com réplica na pasta, por ordem.
     pub fn replica_device_ids(&self) -> Vec<String> {
         self.files().replicas.keys().cloned().collect()

@@ -13,3 +13,4 @@
 - [ ] As réplicas antigas são fundidas antes da proposta de remoção; remover não perde dados
 - [ ] Marcar um dispositivo como roubado sinaliza que a rotação deve ser proposta
 - [ ] Entrar só com a palavra-passe mestra continua a deixar o dispositivo pendente
+- [ ] O invólucro da chave de recuperação e o da palavra-passe mestra não se podem trocar um pelo outro: o AAD inclui o tipo de método de desbloqueio (ADR-0008), com teste

@@ -89,7 +89,7 @@ impl Vault {
         if keyring.vault_id() != self.vault_id {
             return Err(VaultError::KeyringRejected);
         }
-        let vault_key = keyring.unwrap_with_master_password(master_password)?;
+        let vault_key = keyring.open_master_password_envelope(master_password)?;
         let bytes = self
             .storage
             .read_replica(self.device_id())?
