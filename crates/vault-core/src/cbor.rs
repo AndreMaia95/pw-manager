@@ -3,7 +3,9 @@
 //! O formato exige a codificação canónica: a que o vault-core escreve. Cada valor
 //! tem uma única sequência de bytes válida (inteiros e comprimentos na forma mais
 //! curta, comprimentos definidos, chaves dos campos em texto e pela ordem
-//! declarada, sem campos repetidos nem bytes a mais). O que vem da pasta do cofre
+//! canónica, sem campos repetidos nem bytes a mais). Hoje todos os mapas são os
+//! da versão 1.0 e não aceitam campos desconhecidos, por isso a ordem canónica
+//! é a ordem declarada; a ordem dos campos acrescentados depois está no ADR-0008. O que vem da pasta do cofre
 //! pode vir de um atacante, por isso a leitura volta a codificar o que leu e
 //! rejeita se os bytes não forem exatamente os mesmos.
 

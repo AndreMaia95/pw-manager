@@ -11,5 +11,6 @@
 - [ ] Editar uma entrada atualiza os campos
 - [ ] A listagem nunca inclui palavra-passe nem notas
 - [ ] Revelar devolve só o campo pedido de uma entrada; notas tratadas exatamente como a palavra-passe
-- [ ] Campos CBOR desconhecidos numa entrada são preservados depois de editar e gravar, escritos de novo exatamente como vieram, para passarem a verificação da codificação canónica (ADR-0008; hoje um campo desconhecido é rejeitado)
+- [ ] Campos CBOR desconhecidos (no corpo da réplica e em cada entrada) são guardados como CBOR em bruto e reescritos na ordem canónica (ADR-0008), sem alterações, para continuarem a passar a verificação byte a byte. Até aqui um campo desconhecido é rejeitado
+- [ ] Teste: uma réplica de uma versão secundária mais nova, com um campo desconhecido no corpo e outro numa entrada, é lida, editada e reescrita por esta versão sem perder nem alterar nenhum desses campos (bytes iguais aos originais); a parte da fusão chega com o ticket 09
 - [ ] Uma réplica com versão principal do formato mais recente faz o cofre recusar escrever e pedir atualização

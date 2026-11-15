@@ -13,3 +13,4 @@
 - [ ] Uma entrada apagada num dispositivo não ressuscita quando outro dispositivo que esteve meses offline sincroniza
 - [ ] Apagar a réplica de um dispositivo depois de fundida não perde dados
 - [ ] Testes de propriedades: a fusão é comutativa, associativa e idempotente sobre conjuntos aleatórios de réplicas e edições
+- [ ] Teste: uma réplica de uma versão secundária mais nova, com um campo desconhecido no corpo e outro numa entrada, é lida, fundida e reescrita por esta versão sem perder nem alterar nenhum desses campos (continua o teste do ticket 05; ADR-0008)
