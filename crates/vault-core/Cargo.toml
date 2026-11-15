@@ -1,0 +1,24 @@
+[package]
+name = "vault-core"
+version = "0.1.0"
+edition = "2024"
+description = "Núcleo do pw-manager: domínio e criptografia do cofre."
+publish = false
+
+[dependencies]
+argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "parallel", "zeroize"] }
+chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc", "zeroize"] }
+ciborium = "0.2.2"
+getrandom = "0.4.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_bytes = "0.11.19"
+thiserror = "2.0.21"
+zeroize = "1.9.1"
+
+[features]
+# Duplos de teste (pasta do cofre em memória, relógio manual, Argon2id leve).
+# Nunca ativar em produção.
+testing = []
+
+[dev-dependencies]
+vault-core = { path = ".", features = ["testing"] }

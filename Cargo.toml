@@ -1,0 +1,11 @@
+[workspace]
+resolver = "3"
+members = ["crates/vault-core"]
+
+# O Argon2id de produção (256 MiB) é demasiado lento sem otimização, mesmo em
+# compilações de desenvolvimento.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

@@ -35,3 +35,6 @@ venv/
 # --- Logs / temporários ---
 *.log
 tmp/
+
+# --- Rust ---
+/target/

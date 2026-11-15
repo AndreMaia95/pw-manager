@@ -6,11 +6,21 @@
 
 **Status:** ready-for-agent
 
-- [ ] Criar o cofre escreve um chaveiro e a réplica deste dispositivo na pasta do cofre em memória
-- [ ] Desbloquear com a palavra-passe mestra correta funciona; com uma errada falha sem revelar porquê
-- [ ] Bloquear apaga a chave do cofre da memória; operações sobre o cofre bloqueado falham
-- [ ] Uma réplica com cabeçalho alterado (qualquer byte) é rejeitada
-- [ ] Parâmetros do Argon2id de produção: ~256 MiB, 3 iterações, 4 threads, com calibração na criação
+- [x] Criar o cofre escreve um chaveiro e a réplica deste dispositivo na pasta do cofre em memória
+- [x] Desbloquear com a palavra-passe mestra correta funciona; com uma errada falha sem revelar porquê
+- [x] Bloquear apaga a chave do cofre da memória; operações sobre o cofre bloqueado falham
+- [x] Uma réplica com cabeçalho alterado (qualquer byte) é rejeitada
+- [x] Parâmetros do Argon2id de produção: ~256 MiB, 3 iterações, 4 threads, com calibração na criação
 - [ ] Só bibliotecas criptográficas auditadas; aleatoriedade do CSPRNG do SO
-- [ ] A API pública do vault-core não expõe tipos do Tauri (compatível com UniFFI, ADR-0011)
-- [ ] O ambiente de testes permite criar N dispositivos com relógios controláveis independentes
+- [x] A API pública do vault-core não expõe tipos do Tauri (compatível com UniFFI, ADR-0011)
+- [x] O ambiente de testes permite criar N dispositivos com relógios controláveis independentes
+
+## Comments
+
+**Implementado em `crates/vault-core`** (testes em `crates/vault-core/tests/`, a correr com `cargo test`; `cargo test -- --ignored` corre a calibração real de 256 MiB).
+
+- "Só bibliotecas criptográficas auditadas" fica por confirmar: XChaCha20-Poly1305 vem do `chacha20poly1305` da RustCrypto (auditado pela NCC Group em 2020) e a aleatoriedade do `getrandom` (CSPRNG do SO), mas não confirmámos uma auditoria publicada do crate `argon2` da RustCrypto. A alternativa auditada seria o libsodium (`libsodium-sys-stable`).
+- O chaveiro difere do ADR-0008: o corpo fica em claro (é dele que sai a chave do cofre) e cada invólucro leva o seu nonce, autenticando o cabeçalho como AAD. Fica documentado em `src/keyring.rs`.
+- Calibração: `KdfParams::calibrated()` mede os parâmetros de produção e acrescenta iterações até ~1 s, no máximo 10, nunca abaixo de 3. A app deve passá-la a `Vault::create`.
+- Deixado para outros tickets: campos CBOR desconhecidos e recusa de versão principal mais recente (05), vetores e fuzzing (03), assinatura (10). Uma versão principal mais recente é hoje rejeitada como réplica/chaveiro inválido.
+- O relógio só é injetado em `Vault::create`; `Vault::open` ainda não o recebe, porque nada o usa depois de criar.
