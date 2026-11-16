@@ -1,0 +1,3 @@
+# Os vetores de teste do formato são bytes exatos: o git nunca lhes converte os
+# fins de linha (p. ex. core.autocrlf no Windows). Ver crates/vault-core/tests/vectors/README.md.
+crates/vault-core/tests/vectors/v*/** binary
