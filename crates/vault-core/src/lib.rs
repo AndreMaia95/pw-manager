@@ -16,6 +16,7 @@ mod ids;
 mod kdf;
 mod keyring;
 mod replica;
+mod search;
 mod storage;
 #[cfg(feature = "testing")]
 pub mod testing;

@@ -12,3 +12,4 @@
 - [ ] Ao fim de 30 dias no Lixo a entrada torna-se lápide
 - [ ] Apagar definitivamente e esvaziar o Lixo produzem lápides de imediato
 - [ ] Uma lápide não contém nenhum dado da entrada (nem palavra-passe, nem histórico, nem notas)
+- [ ] Entradas no Lixo e lápides não aparecem na pesquisa normal (`Vault::search`, vindo do ticket 06) nem na listagem normal

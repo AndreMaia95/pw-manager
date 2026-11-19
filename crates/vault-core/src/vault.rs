@@ -9,6 +9,7 @@ use crate::entry::{
 use crate::ids::{DeviceId, Id, VaultId};
 use crate::keyring::Keyring;
 use crate::replica::{self, ReplicaBody, ReplicaOwner};
+use crate::search::Query;
 use crate::{Clock, KdfParams, Storage, VaultError};
 
 const FIRST_GENERATION: u64 = 1;
@@ -178,6 +179,15 @@ impl Vault {
         let mut entries: Vec<EntrySummary> =
             session.body.entries.values().map(Entry::summary).collect();
         entries.sort_by_cached_key(|entry| entry.title.to_lowercase());
+        Ok(entries)
+    }
+
+    /// As entradas com `query` no título, no URL ou no utilizador, só com
+    /// metadados e pela ordem de [`Vault::list_entries`].
+    pub fn search(&self, query: &str) -> Result<Vec<EntrySummary>, VaultError> {
+        let query = Query::new(query);
+        let mut entries = self.list_entries()?;
+        entries.retain(|entry| query.matches(entry));
         Ok(entries)
     }
 
