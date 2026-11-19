@@ -1,8 +1,13 @@
 //! Gera um vetor de teste do formato com a versão atual (ADR-0016).
 //!
 //! ```text
-//! cargo run -p vault-core --example generate_format_vector -- <nome>
+//! cargo run -p vault-core --example generate_format_vector -- <nome> [--with-unknown-fields]
 //! ```
+//!
+//! Com `--with-unknown-fields`, a réplica do vetor é a que esta versão
+//! reescreve depois de ler uma réplica de uma versão secundária mais nova com
+//! um campo desconhecido no corpo e outro numa entrada (ADR-0008): leva a
+//! versão do formato desta app no cabeçalho e os campos preservados no corpo.
 //!
 //! Escreve `crates/vault-core/tests/vectors/v<versão>/<nome>/`, com a versão do
 //! formato lida dos bytes escritos (não do que se escreve na linha de comandos),
@@ -15,8 +20,13 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use vault_core::testing::{ManualClock, MemoryVaultFolder};
-use vault_core::{EntryFields, KdfParams, SecretField, Vault};
+use vault_core::testing::{self, ManualClock, MemoryVaultFolder};
+use vault_core::{EntryChanges, EntryFields, KdfParams, SecretField, Vault};
+
+#[path = "../tests/common/cbor.rs"]
+mod cbor;
+
+use cbor::{array, bytes, map, text, uint};
 
 /// Parâmetros fixos e leves, com mais de uma iteração e de uma lane para que o
 /// leitor tenha de usar os parâmetros guardados no invólucro.
@@ -48,15 +58,37 @@ const ENTRIES: &[[&str; 5]] = &[
     ],
 ];
 
+/// O campo desconhecido do corpo e o da entrada "GitHub", como os escreveria
+/// uma versão secundária mais nova: chave e valor em CBOR em bruto. Os valores
+/// são CBOR bem formado que o vault-core nunca escreveria assim (array de
+/// comprimento indefinido, inteiro fora da forma mais curta, float de 16 bits,
+/// mapa fora da ordem canónica), para provar que voltam sem alterações.
+const UNKNOWN_BODY_FIELD: (&str, &[u8]) = ("from_v1_1", b"\x9f\x18\x05\xf9\x3c\x00\xff");
+const UNKNOWN_ENTRY_FIELD: (&str, &[u8]) = ("colour", b"\xa2\x61b\x01\x61a\x02");
+
 fn main() -> ExitCode {
-    let Some(name) = std::env::args().nth(1) else {
-        eprintln!("uso: generate_format_vector <nome>, p. ex. single-device");
-        return ExitCode::FAILURE;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let (name, with_unknown_fields) = match args.as_slice() {
+        [name] => (name.clone(), false),
+        [name, flag] if flag == "--with-unknown-fields" => (name.clone(), true),
+        _ => {
+            eprintln!(
+                "uso: generate_format_vector <nome> [--with-unknown-fields], p. ex. single-device"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let write = |master_password: &str| {
+        let (folder, vault) = write_vault(master_password);
+        if with_unknown_fields {
+            add_unknown_fields(&folder, &vault, master_password);
+        }
+        (folder, vault)
     };
 
     // A palavra-passe leva a versão, que só se conhece depois de escrever; o
     // primeiro cofre serve para a descobrir.
-    let version = match format_version(&write_vault("versão").0) {
+    let version = match format_version(&write("versão").0) {
         Ok(version) => version,
         Err(message) => {
             eprintln!("{message}");
@@ -72,7 +104,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let master_password = format!("vetor de teste {version}");
-    let (folder, vault) = write_vault(&master_password);
+    let (folder, vault) = write(&master_password);
 
     fs::create_dir_all(dir.join("replicas")).expect("criar a pasta do vetor");
     fs::write(dir.join("keyring"), folder.keyring().expect("chaveiro")).expect("escrever");
@@ -116,12 +148,86 @@ fn main() -> ExitCode {
         created_at_ms: {CREATED_AT_MS},
         entries: &[{entries}
         ],
+        unknown_fields: &[{unknown_fields}],
     }},
 }},"#,
         vault_id = vault.vault_id(),
         device_id = vault.device_id(),
+        unknown_fields = if with_unknown_fields {
+            [UNKNOWN_BODY_FIELD, UNKNOWN_ENTRY_FIELD]
+                .map(|(key, value)| format!("({key:?}, b\"{}\")", escaped(value)))
+                .join(", ")
+        } else {
+            String::new()
+        },
     );
     ExitCode::SUCCESS
+}
+
+/// Simula o caminho real: escreve a réplica de `vault` como a escreveria uma
+/// versão secundária mais nova, com as mesmas entradas e um campo desconhecido
+/// no corpo e outro na entrada "GitHub"; depois esta versão lê-a e reescreve-a
+/// com uma edição.
+fn add_unknown_fields(folder: &MemoryVaultFolder, vault: &Vault, master_password: &str) {
+    let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    for entry in vault.list_entries().expect("listar as entradas") {
+        let reveal = |field| vault.reveal(&entry.id, field).expect("revelar");
+        let id = from_hex(&entry.id);
+        // A ordem canónica do mapa de uma entrada (ADR-0008): pelos bytes da
+        // chave codificada, com o comprimento primeiro.
+        let mut fields = vec![
+            ("id", bytes(&id)),
+            ("url", text(&entry.url)),
+            ("notes", text(&reveal(SecretField::Notes))),
+            ("title", text(&entry.title)),
+        ];
+        if entry.title == "GitHub" {
+            fields.push((UNKNOWN_ENTRY_FIELD.0, UNKNOWN_ENTRY_FIELD.1.to_vec()));
+        }
+        fields.push(("password", text(&reveal(SecretField::Password))));
+        fields.push(("username", text(&entry.username)));
+        entries.push((id, map(&fields)));
+    }
+    entries.sort();
+    let entries: Vec<Vec<u8>> = entries.into_iter().map(|(_, entry)| entry).collect();
+    let body = map(&[
+        ("created_at_ms", uint(CREATED_AT_MS as u64)),
+        ("entries", array(&entries)),
+        (UNKNOWN_BODY_FIELD.0, UNKNOWN_BODY_FIELD.1.to_vec()),
+    ]);
+
+    let device_id = vault.device_id();
+    let mut replica =
+        testing::open_replica(folder, &device_id, master_password).expect("decifrar a réplica");
+    let minor = u16::from_be_bytes([replica.header[6], replica.header[7]]);
+    replica.header[6..8].copy_from_slice(&(minor + 1).to_be_bytes());
+    replica.body = body;
+    testing::write_replica(folder, &device_id, master_password, replica).expect("cifrar");
+
+    vault.lock();
+    vault
+        .unlock_with_master_password(master_password)
+        .expect("ler a réplica da versão mais nova");
+    let github = vault
+        .list_entries()
+        .expect("listar as entradas")
+        .into_iter()
+        .find(|entry| entry.title == "GitHub")
+        .expect("a entrada GitHub");
+    vault
+        .update_entry(&github.id, EntryChanges::default())
+        .expect("reescrever a réplica");
+}
+
+fn from_hex(hex: &str) -> Vec<u8> {
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("id em hexadecimal"))
+        .collect()
+}
+
+fn escaped(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("\\x{byte:02x}")).collect()
 }
 
 /// Um cofre novo, escrito pela versão atual numa pasta do cofre em memória.

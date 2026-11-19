@@ -45,6 +45,11 @@ dados que os vetores existentes ainda não cobrem (entradas, histórico, lápide
    cargo run -p vault-core --example generate_format_vector -- <nome>
    ```
 
+   Com `--with-unknown-fields` no fim, a réplica do vetor é a que a versão
+   atual reescreve depois de ler uma réplica de uma versão secundária mais nova,
+   com um campo desconhecido no corpo e outro numa entrada (ADR-0008). Os campos
+   que o vetor tem de preservar vão para `unknown_fields` em `ExpectedState`.
+
    O gerador lê a versão do formato dos bytes que escreveu e põe o vetor em
    `v<principal>.<secundária>/<nome>/`. Recusa-se a escrever sobre uma pasta que
    já existe, e desiste se o chaveiro e a réplica tiverem versões diferentes (nesse

@@ -322,3 +322,26 @@ fn an_edit_that_cannot_be_written_to_the_vault_folder_changes_nothing() {
     );
     assert_eq!(env.folder.replica(&vault.device_id()), replica);
 }
+
+#[test]
+fn an_edit_can_clear_a_field_which_is_not_the_same_as_leaving_it_out() {
+    let vault = new_vault();
+    let id = vault.create_entry(github()).unwrap();
+
+    let clear_notes_and_username = EntryChanges {
+        notes: Some(String::new()),
+        username: Some(String::new()),
+        ..EntryChanges::default()
+    };
+    vault.update_entry(&id, clear_notes_and_username).unwrap();
+    vault.update_entry(&id, EntryChanges::default()).unwrap();
+    vault.lock();
+    vault.unlock_with_master_password(PASSWORD).unwrap();
+
+    assert_eq!(vault.reveal(&id, SecretField::Notes).as_deref(), Ok(""));
+    assert_eq!(vault.list_entries().unwrap()[0].username, "");
+    assert_eq!(
+        vault.reveal(&id, SecretField::Password).as_deref(),
+        Ok("correto cavalo bateria")
+    );
+}

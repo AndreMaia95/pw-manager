@@ -36,3 +36,11 @@
 - Testes: `testing::open_replica` e `testing::write_replica` decifram e voltam a cifrar uma réplica. É assim que o teste escreve uma réplica "de uma versão mais nova".
 - Fuzzing curto (cerca de 45 s por alvo, cargo-fuzz) sem falhas.
 - Deixado para depois: estado no Lixo (07) e entrada exposta (18) em `EntryState`; fusão com campos desconhecidos (09); preservar campos desconhecidos no chaveiro, quando esta versão o reescrever (14).
+
+**Acrescentos depois da revisão (2026-11-19).**
+
+- Edição parcial: `Some("")` limpa um campo, e é diferente de `None`, que o deixa como está. Testado em `an_edit_can_clear_a_field_which_is_not_the_same_as_leaving_it_out`, que limpa as notas e o utilizador.
+- Vetor novo `v1.0/with-unknown-fields`, gerado com `--with-unknown-fields`. Tem duas entradas, uma com notas. O corpo leva um campo desconhecido e outro vai na entrada "GitHub". É a réplica que esta versão reescreve depois de ler uma de 1.1. `unknown_fields_in_every_format_vector_survive_a_rewrite_byte_for_byte` verifica, em cada vetor, que esses campos estão lá e continuam iguais depois de uma reescrita. Os vetores existentes não foram tocados.
+- ADR-0008: a partir do primeiro uso com dados reais, qualquer alteração ao formato sobe a versão.
+- O teste da versão secundária mais nova é `unknown_fields_from_a_newer_minor_version_survive_an_edit_byte_for_byte` (`tests/unknown_fields.rs`).
+- Ticket 24: a interface ordena com `Intl.Collator` em português.

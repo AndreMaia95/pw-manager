@@ -9,9 +9,10 @@ mod common;
 
 use std::sync::Arc;
 
+use common::cbor::text;
 use common::{load_vector, vector_dirs, vectors_root};
-use vault_core::testing::MemoryVaultFolder;
-use vault_core::{EntryState, SecretField, Vault, VaultError};
+use vault_core::testing::{self, MemoryVaultFolder};
+use vault_core::{EntryChanges, EntryState, SecretField, Vault, VaultError};
 
 struct FormatVector {
     /// Pasta do vetor, relativa a `tests/vectors/`.
@@ -27,6 +28,10 @@ struct ExpectedState {
     created_at_ms: i64,
     /// Pela ordem da listagem.
     entries: &'static [ExpectedEntry],
+    /// Campos desconhecidos (chave, valor CBOR em bruto) que têm de estar no
+    /// corpo da réplica, e continuar lá sem alterações depois de esta versão a
+    /// reescrever (ADR-0008).
+    unknown_fields: &'static [(&'static str, &'static [u8])],
 }
 
 struct ExpectedEntry {
@@ -47,6 +52,7 @@ const VECTORS: &[FormatVector] = &[
             device_id: "ab562aa114359e9e8be9a58410813035",
             created_at_ms: 1_767_225_600_000,
             entries: &[],
+            unknown_fields: &[],
         },
     },
     FormatVector {
@@ -73,6 +79,38 @@ const VECTORS: &[FormatVector] = &[
                     password: "vetor: palavra-passe 1",
                     notes: "vetor: notas 1",
                 },
+            ],
+            unknown_fields: &[],
+        },
+    },
+    FormatVector {
+        path: "v1.0/with-unknown-fields",
+        master_password: "vetor de teste v1.0",
+        expected: ExpectedState {
+            vault_id: "81a9dde8f0ecb28a4a9abf66ef01c41d",
+            device_id: "9a511dd61a5195043b2fbe748dbf0870",
+            created_at_ms: 1_767_225_600_000,
+            entries: &[
+                ExpectedEntry {
+                    id: "fcf93b12c0ef2401807c79e54a9b156c",
+                    title: "exemplo.pt",
+                    url: "https://www.exemplo.pt/entrar",
+                    username: "utilizador@exemplo.pt",
+                    password: "vetor: palavra-passe 2",
+                    notes: "",
+                },
+                ExpectedEntry {
+                    id: "35f645c228d4e9497d42139284f7df7d",
+                    title: "GitHub",
+                    url: "https://github.com/login",
+                    username: "andre",
+                    password: "vetor: palavra-passe 1",
+                    notes: "vetor: notas 1",
+                },
+            ],
+            unknown_fields: &[
+                ("from_v1_1", b"\x9f\x18\x05\xf9\x3c\x00\xff"),
+                ("colour", b"\xa2\x61\x62\x01\x61\x61\x02"),
             ],
         },
     },
@@ -101,6 +139,44 @@ fn every_format_vector_opens_with_the_current_version_and_gives_the_expected_sta
             "{path}: data de criação"
         );
         assert_entries(&vault, expected.entries, path);
+    }
+}
+
+#[test]
+fn unknown_fields_in_every_format_vector_survive_a_rewrite_byte_for_byte() {
+    for vector in VECTORS {
+        let path = vector.path;
+        let expected = &vector.expected;
+        let folder = load(path);
+        assert_unknown_fields(&folder, vector, "como está no vetor");
+
+        let vault =
+            unlock(&folder, vector).unwrap_or_else(|error| panic!("{path}: desbloquear: {error}"));
+        if let Some(entry) = expected.entries.first() {
+            let changes = EntryChanges {
+                title: Some("editada por esta versão".to_owned()),
+                ..EntryChanges::default()
+            };
+            vault.update_entry(entry.id, changes).unwrap();
+        } else {
+            vault.save_replica().unwrap();
+        }
+        assert_unknown_fields(&folder, vector, "depois de reescrita");
+    }
+}
+
+fn assert_unknown_fields(folder: &MemoryVaultFolder, vector: &FormatVector, when: &str) {
+    let path = vector.path;
+    let device_id = vector.expected.device_id;
+    let body = testing::open_replica(folder, device_id, vector.master_password)
+        .unwrap_or_else(|error| panic!("{path}: decifrar a réplica: {error}"))
+        .body;
+    for (key, value) in vector.expected.unknown_fields {
+        let field = [text(key), value.to_vec()].concat();
+        assert!(
+            body.windows(field.len()).any(|window| window == field),
+            "{path}: campo desconhecido {key:?} {when}"
+        );
     }
 }
 
