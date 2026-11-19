@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use common::{load_vector, vector_dirs, vectors_root};
 use vault_core::testing::MemoryVaultFolder;
-use vault_core::{Vault, VaultError};
+use vault_core::{EntryState, SecretField, Vault, VaultError};
 
 struct FormatVector {
     /// Pasta do vetor, relativa a `tests/vectors/`.
@@ -25,17 +25,58 @@ struct ExpectedState {
     vault_id: &'static str,
     device_id: &'static str,
     created_at_ms: i64,
+    /// Pela ordem da listagem.
+    entries: &'static [ExpectedEntry],
 }
 
-const VECTORS: &[FormatVector] = &[FormatVector {
-    path: "v1.0/single-device",
-    master_password: "vetor de teste v1.0",
-    expected: ExpectedState {
-        vault_id: "9af562379a9056d682b6522634ad7717",
-        device_id: "ab562aa114359e9e8be9a58410813035",
-        created_at_ms: 1_767_225_600_000,
+struct ExpectedEntry {
+    id: &'static str,
+    title: &'static str,
+    url: &'static str,
+    username: &'static str,
+    password: &'static str,
+    notes: &'static str,
+}
+
+const VECTORS: &[FormatVector] = &[
+    FormatVector {
+        path: "v1.0/single-device",
+        master_password: "vetor de teste v1.0",
+        expected: ExpectedState {
+            vault_id: "9af562379a9056d682b6522634ad7717",
+            device_id: "ab562aa114359e9e8be9a58410813035",
+            created_at_ms: 1_767_225_600_000,
+            entries: &[],
+        },
     },
-}];
+    FormatVector {
+        path: "v1.0/with-entries",
+        master_password: "vetor de teste v1.0",
+        expected: ExpectedState {
+            vault_id: "65b5278fd0ea936e1dd767df5e514fbd",
+            device_id: "a0b3e7051a53c19417b6048dc222dfd3",
+            created_at_ms: 1_767_225_600_000,
+            entries: &[
+                ExpectedEntry {
+                    id: "b2918d7d780100945283d73fa0e49158",
+                    title: "exemplo.pt",
+                    url: "https://www.exemplo.pt/entrar",
+                    username: "utilizador@exemplo.pt",
+                    password: "vetor: palavra-passe 2",
+                    notes: "",
+                },
+                ExpectedEntry {
+                    id: "12f71dfa8150d3af15d3c239ec4cb9a6",
+                    title: "GitHub",
+                    url: "https://github.com/login",
+                    username: "andre",
+                    password: "vetor: palavra-passe 1",
+                    notes: "vetor: notas 1",
+                },
+            ],
+        },
+    },
+];
 
 #[test]
 fn every_format_vector_opens_with_the_current_version_and_gives_the_expected_state() {
@@ -58,6 +99,35 @@ fn every_format_vector_opens_with_the_current_version_and_gives_the_expected_sta
             vault.created_at_ms(),
             Ok(expected.created_at_ms),
             "{path}: data de criação"
+        );
+        assert_entries(&vault, expected.entries, path);
+    }
+}
+
+fn assert_entries(vault: &Vault, expected: &[ExpectedEntry], path: &str) {
+    let entries = vault
+        .list_entries()
+        .unwrap_or_else(|error| panic!("{path}: listar as entradas: {error}"));
+    assert_eq!(entries.len(), expected.len(), "{path}: número de entradas");
+    for (entry, expected) in entries.iter().zip(expected) {
+        let id = expected.id;
+        assert_eq!(entry.id, id, "{path}: id da entrada");
+        assert_eq!(entry.title, expected.title, "{path}: título de {id}");
+        assert_eq!(entry.url, expected.url, "{path}: URL de {id}");
+        assert_eq!(
+            entry.username, expected.username,
+            "{path}: utilizador de {id}"
+        );
+        assert_eq!(entry.state, EntryState::Active, "{path}: estado de {id}");
+        assert_eq!(
+            vault.reveal(id, SecretField::Password).as_deref(),
+            Ok(expected.password),
+            "{path}: palavra-passe de {id}"
+        );
+        assert_eq!(
+            vault.reveal(id, SecretField::Notes).as_deref(),
+            Ok(expected.notes),
+            "{path}: notas de {id}"
         );
     }
 }

@@ -8,24 +8,38 @@
 //!   | id do cofre (16) | id do dispositivo (16) | geração u64 BE | nonce (24)
 //! corpo: CBOR cifrado com XChaCha20-Poly1305 pela chave do cofre
 //! ```
+//!
+//! O corpo é um mapa (ADR-0008). Nasceu na versão 1.0 com `created_at_ms`;
+//! `entries` foi acrescentado depois e só é escrito quando há entradas. É um
+//! array com o mapa de cada entrada, ordenado pelos bytes do id da entrada.
+//! Campos desconhecidos, no corpo e em cada entrada, são preservados.
 
-use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
 use zeroize::Zeroizing;
 
 use crate::VaultError;
-use crate::cbor;
+use crate::cbor::{self, MapReader, MapWriter, UnknownFields};
 use crate::crypto::{self, NONCE_LEN, SecretKey};
+use crate::entry::{Entry, EntryId};
+use crate::format_version;
 use crate::ids::{DeviceId, ID_LEN, Id, VaultId};
 
 const MAGIC: [u8; 4] = *b"PWMR";
 const FORMAT_MAJOR: u16 = 1;
 const FORMAT_MINOR: u16 = 0;
-const HEADER_LEN: usize = 4 + 2 + 2 + ID_LEN + ID_LEN + 8 + NONCE_LEN;
+pub(crate) const HEADER_LEN: usize = 4 + 2 + 2 + ID_LEN + ID_LEN + 8 + NONCE_LEN;
+/// Onde começa o nonce, o último campo do cabeçalho.
+#[cfg(feature = "testing")]
+pub(crate) const NONCE_OFFSET: usize = HEADER_LEN - NONCE_LEN;
 
 /// O estado do cofre que este dispositivo conhece.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReplicaBody {
     pub(crate) created_at_ms: i64,
+    pub(crate) entries: BTreeMap<EntryId, Entry>,
+    /// Campos escritos por uma versão mais nova, preservados (ADR-0008).
+    pub(crate) unknown: UnknownFields,
 }
 
 /// A quem a réplica tem de pertencer para ser aceite.
@@ -48,26 +62,25 @@ pub(crate) fn seal(
 }
 
 /// Lê uma réplica. Rejeita-a se estiver mal formada, se o cabeçalho ou o corpo
-/// não forem autênticos, ou se não pertencer a `owner`.
+/// não forem autênticos, ou se não pertencer a `owner`. Uma réplica de uma
+/// versão principal mais recente não é lida: pede atualização.
 pub(crate) fn open(
     bytes: &[u8],
     owner: &ReplicaOwner,
     vault_key: &SecretKey,
 ) -> Result<ReplicaBody, VaultError> {
+    format_version::check_major(bytes, MAGIC, FORMAT_MAJOR, VaultError::ReplicaRejected)?;
     let (header, ciphertext) = bytes
         .split_first_chunk::<HEADER_LEN>()
         .ok_or(VaultError::ReplicaRejected)?;
-    let (magic, rest) = header.split_first_chunk::<4>().unwrap();
-    let (major, rest) = rest.split_first_chunk::<2>().unwrap();
-    let (_minor, rest) = rest.split_first_chunk::<2>().unwrap();
+    // O identificador e a versão principal já foram verificados.
+    let (_magic_and_version, rest) = header.split_first_chunk::<8>().unwrap();
     let (vault_id, rest) = rest.split_first_chunk::<ID_LEN>().unwrap();
     let (device_id, rest) = rest.split_first_chunk::<ID_LEN>().unwrap();
     let (generation, nonce) = rest.split_first_chunk::<8>().unwrap();
     let nonce: &[u8; NONCE_LEN] = nonce.try_into().unwrap();
 
-    let belongs_to_owner = *magic == MAGIC
-        && u16::from_be_bytes(*major) == FORMAT_MAJOR
-        && Id(*vault_id) == owner.vault_id
+    let belongs_to_owner = Id(*vault_id) == owner.vault_id
         && Id(*device_id) == owner.device_id
         && u64::from_be_bytes(*generation) == owner.generation;
     if !belongs_to_owner {
@@ -79,12 +92,43 @@ pub(crate) fn open(
 }
 
 pub(crate) fn encode_body(body: &ReplicaBody) -> Zeroizing<Vec<u8>> {
-    cbor::encode(body)
+    let mut map = MapWriter::new();
+    map.born("created_at_ms", &body.created_at_ms);
+    if !body.entries.is_empty() {
+        let entries = body.entries.values().map(Entry::encode).collect();
+        map.added_item("entries", cbor::encode_array(entries));
+    }
+    map.unknown(&body.unknown);
+    map.finish()
 }
 
 /// O corpo decifrado da réplica, em CBOR na codificação canónica (ADR-0008).
 pub(crate) fn decode_body(plaintext: &[u8]) -> Result<ReplicaBody, VaultError> {
-    cbor::decode_canonical(plaintext).ok_or(VaultError::ReplicaRejected)
+    let body = parse_body(plaintext).ok_or(VaultError::ReplicaRejected)?;
+    // Apanha tudo o que a leitura campo a campo deixa passar: outra ordem dos
+    // campos ou das entradas, ids repetidos, `entries` vazio, formas mais
+    // longas do que a mais curta.
+    if *encode_body(&body) != *plaintext {
+        return Err(VaultError::ReplicaRejected);
+    }
+    Ok(body)
+}
+
+fn parse_body(plaintext: &[u8]) -> Option<ReplicaBody> {
+    let mut map = MapReader::parse(plaintext)?;
+    let created_at_ms = cbor::decode_value(map.take("created_at_ms")?)?;
+    let mut entries = BTreeMap::new();
+    if let Some(items) = map.take("entries") {
+        for item in cbor::split_array(items)? {
+            let entry = Entry::decode(item)?;
+            entries.insert(entry.id, entry);
+        }
+    }
+    Some(ReplicaBody {
+        created_at_ms,
+        entries,
+        unknown: map.into_unknown(),
+    })
 }
 
 fn encode_header(owner: &ReplicaOwner, nonce: &[u8; NONCE_LEN]) -> [u8; HEADER_LEN] {

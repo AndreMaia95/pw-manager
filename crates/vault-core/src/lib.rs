@@ -7,7 +7,9 @@
 mod cbor;
 mod clock;
 mod crypto;
+mod entry;
 mod error;
+mod format_version;
 #[cfg(feature = "fuzzing")]
 pub mod fuzzing;
 mod ids;
@@ -20,6 +22,7 @@ pub mod testing;
 mod vault;
 
 pub use clock::{Clock, SystemClock};
+pub use entry::{EntryChanges, EntryFields, EntryState, EntrySummary, SecretField};
 pub use error::{StorageError, VaultError};
 pub use kdf::KdfParams;
 pub use storage::Storage;

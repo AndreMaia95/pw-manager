@@ -28,7 +28,20 @@ const WRONG_PASSWORD: &str = "não é a palavra-passe mestra";
 pub fn keyring(data: &[u8]) {
     let keyring = match Keyring::decode(data) {
         Ok(keyring) => keyring,
-        Err(VaultError::KeyringRejected) => return,
+        Err(VaultError::KeyringRejected) => {
+            assert!(
+                !is_newer_major(data, b"PWMK"),
+                "rejeitou um chaveiro de uma versão principal mais recente sem pedir atualização"
+            );
+            return;
+        }
+        Err(VaultError::UpdateRequired) => {
+            assert!(
+                is_newer_major(data, b"PWMK"),
+                "pediu atualização para um chaveiro que não é de uma versão principal mais recente"
+            );
+            return;
+        }
         Err(other) => panic!("erro inesperado ao ler um chaveiro: {other:?}"),
     };
     assert_eq!(
@@ -66,13 +79,21 @@ pub fn keyring(data: &[u8]) {
 
 /// O leitor da réplica. Primeiro tal como vem: sem a chave do cofre, nenhuns
 /// bytes são uma réplica autêntica. Depois com os mesmos bytes autenticados pela
-/// chave do cofre: o leitor só aceita o cabeçalho do dono da réplica.
+/// chave do cofre: o leitor só aceita o cabeçalho do dono da réplica. Em ambos
+/// os casos, uma réplica de uma versão principal mais recente pede atualização
+/// sem ser lida.
 pub fn replica(data: &[u8]) {
     let owner = owner();
     let vault_key = SecretKey::new(VAULT_KEY);
+    let newer_major = is_newer_major(data, b"PWMR");
+    let unreadable = if newer_major {
+        VaultError::UpdateRequired
+    } else {
+        VaultError::ReplicaRejected
+    };
     assert_eq!(
         replica::open(data, &owner, &vault_key).err(),
-        Some(VaultError::ReplicaRejected),
+        Some(unreadable),
         "aceitou uma réplica sem a autenticar"
     );
 
@@ -90,7 +111,9 @@ pub fn replica(data: &[u8]) {
         && header[8..24] == OWNER_VAULT_ID
         && header[24..40] == OWNER_DEVICE_ID
         && header[40..48] == OWNER_GENERATION.to_be_bytes();
-    let expected = if belongs_to_owner {
+    let expected = if newer_major {
+        Err(VaultError::UpdateRequired)
+    } else if belongs_to_owner {
         replica::decode_body(plaintext)
     } else {
         Err(VaultError::ReplicaRejected)
@@ -119,6 +142,11 @@ pub fn replica_body(data: &[u8]) {
         replica::decode_body(&[data, &[0]].concat()).is_err(),
         "aceitou bytes a mais depois do corpo"
     );
+}
+
+/// Tem o identificador `magic` e uma versão principal acima de 1, a desta app.
+fn is_newer_major(data: &[u8], magic: &[u8; 4]) -> bool {
+    data.len() >= 6 && data[0..4] == *magic && u16::from_be_bytes([data[4], data[5]]) > 1
 }
 
 fn owner() -> ReplicaOwner {

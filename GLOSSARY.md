@@ -10,6 +10,10 @@ O código é escrito em inglês. A coluna **Em código** dá o identificador que
 | --- | --- | --- | --- |
 | **Cofre** | O conjunto de todas as entradas do utilizador, independentemente de onde ou em quantas réplicas está guardado. | `Vault` | base de dados, ficheiro do cofre, vault |
 | **Entrada** | Um registo de credenciais de um site ou serviço: título, um URL, utilizador, palavra-passe e notas, com espaço para mais campos no futuro. | `Entry` | item, registo, login, conta |
+| **Metadados da entrada** | O que a listagem mostra de uma entrada: id, título, URL, utilizador e estado, nunca a palavra-passe nem as notas. | `EntrySummary` | resumo, pré-visualização |
+| **Revelar** | Pedir explicitamente um campo secreto (palavra-passe ou notas) de uma entrada; é a única forma de um segredo sair do vault-core. | `reveal` | mostrar, desencriptar |
+| **Campo secreto** | Um campo de uma entrada que só sai do vault-core quando revelado: a palavra-passe e as notas. | `SecretField` | campo privado, campo sensível |
+| **Campo desconhecido** | Um campo da réplica escrito por uma versão mais nova da app, que esta versão não conhece mas guarda e reescreve sem alterações. | `UnknownFields` | campo extra, campo inválido |
 | **Histórico da entrada** | As últimas versões anteriores de uma entrada, incluindo versões perdidas numa fusão. | `EntryHistory` | versões, revisões |
 | **Entrada exposta** | Uma entrada cujo segredo pode ter sido lido por terceiros e que ainda tem de ser alterado no próprio site. | `exposed` (estado de `Entry`) | entrada comprometida, entrada a alterar |
 | **Lixo** | Onde fica uma entrada apagada durante 30 dias, ainda recuperável, antes de se tornar lápide. | `Trash` | reciclagem, apagadas |

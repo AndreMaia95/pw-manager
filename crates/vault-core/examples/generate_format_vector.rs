@@ -16,7 +16,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use vault_core::testing::{ManualClock, MemoryVaultFolder};
-use vault_core::{KdfParams, Vault};
+use vault_core::{EntryFields, KdfParams, SecretField, Vault};
 
 /// Parâmetros fixos e leves, com mais de uma iteração e de uma lane para que o
 /// leitor tenha de usar os parâmetros guardados no invólucro.
@@ -27,6 +27,26 @@ const KDF: KdfParams = KdfParams {
 };
 /// 2026-01-01T00:00:00Z.
 const CREATED_AT_MS: i64 = 1_767_225_600_000;
+
+/// As entradas do cofre do vetor: (título, URL, utilizador, palavra-passe,
+/// notas). A segunda não tem título, para o vetor guardar um título preenchido
+/// a partir do domínio.
+const ENTRIES: &[[&str; 5]] = &[
+    [
+        "GitHub",
+        "https://github.com/login",
+        "andre",
+        "vetor: palavra-passe 1",
+        "vetor: notas 1",
+    ],
+    [
+        "",
+        "https://www.exemplo.pt/entrar",
+        "utilizador@exemplo.pt",
+        "vetor: palavra-passe 2",
+        "",
+    ],
+];
 
 fn main() -> ExitCode {
     let Some(name) = std::env::args().nth(1) else {
@@ -65,6 +85,27 @@ fn main() -> ExitCode {
         "Vetor escrito em {}. Acrescenta a VECTORS:\n",
         dir.display()
     );
+    let mut entries = String::new();
+    for entry in vault.list_entries().expect("listar as entradas") {
+        let reveal = |field| vault.reveal(&entry.id, field).expect("revelar");
+        entries += &format!(
+            r#"
+            ExpectedEntry {{
+                id: "{}",
+                title: {:?},
+                url: {:?},
+                username: {:?},
+                password: {:?},
+                notes: {:?},
+            }},"#,
+            entry.id,
+            entry.title,
+            entry.url,
+            entry.username,
+            reveal(SecretField::Password),
+            reveal(SecretField::Notes),
+        );
+    }
     println!(
         r#"FormatVector {{
     path: "{name}",
@@ -73,6 +114,8 @@ fn main() -> ExitCode {
         vault_id: "{vault_id}",
         device_id: "{device_id}",
         created_at_ms: {CREATED_AT_MS},
+        entries: &[{entries}
+        ],
     }},
 }},"#,
         vault_id = vault.vault_id(),
@@ -91,6 +134,16 @@ fn write_vault(master_password: &str) -> (MemoryVaultFolder, Vault) {
         KDF,
     )
     .expect("criar o cofre");
+    for [title, url, username, password, notes] in ENTRIES {
+        let fields = EntryFields {
+            title: title.to_string(),
+            url: url.to_string(),
+            username: username.to_string(),
+            password: password.to_string(),
+            notes: notes.to_string(),
+        };
+        vault.create_entry(fields).expect("criar uma entrada");
+    }
     (folder, vault)
 }
 

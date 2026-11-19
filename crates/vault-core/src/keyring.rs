@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cbor;
 use crate::crypto::{self, KEY_LEN, NONCE_LEN, SecretKey};
+use crate::format_version;
 use crate::ids::{DeviceId, ID_LEN, Id, VaultId};
 use crate::{KdfParams, VaultError};
 
@@ -126,19 +127,19 @@ impl Keyring {
         Ok([header_bytes.as_slice(), &cbor::encode(&body)].concat())
     }
 
+    /// Lê um chaveiro. Um chaveiro de uma versão principal mais recente não é
+    /// lido: pede atualização.
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, VaultError> {
+        format_version::check_major(bytes, MAGIC, FORMAT_MAJOR, VaultError::KeyringRejected)?;
         let (header, body) = bytes
             .split_first_chunk::<HEADER_LEN>()
             .ok_or(VaultError::KeyringRejected)?;
-        let (magic, rest) = header.split_first_chunk::<4>().unwrap();
-        let (major, rest) = rest.split_first_chunk::<2>().unwrap();
+        // O identificador e a versão principal já foram verificados.
+        let (_magic_and_major, rest) = header.split_first_chunk::<6>().unwrap();
         let (minor, rest) = rest.split_first_chunk::<2>().unwrap();
         let (vault_id, rest) = rest.split_first_chunk::<ID_LEN>().unwrap();
         let (writer, rest) = rest.split_first_chunk::<ID_LEN>().unwrap();
         let generation = u64::from_be_bytes(*rest.first_chunk::<8>().unwrap());
-        if *magic != MAGIC || u16::from_be_bytes(*major) != FORMAT_MAJOR {
-            return Err(VaultError::KeyringRejected);
-        }
         let (vault_id, writer) = (Id(*vault_id), Id(*writer));
         // Os campos do cabeçalho têm largura fixa, por isso hoje isto só falha se
         // o cabeçalho deixar de ser o que `encode_header` escreve; fica a regra

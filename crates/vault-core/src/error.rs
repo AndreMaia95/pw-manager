@@ -21,8 +21,16 @@ pub enum VaultError {
     /// O chaveiro está mal formado ou não pertence a este cofre.
     #[error("chaveiro rejeitado")]
     KeyringRejected,
+    /// A réplica ou o chaveiro foram escritos com uma versão principal do
+    /// formato mais recente do que a desta app. A app não os lê nem escreve
+    /// por cima: tem de ser atualizada (ADR-0008).
+    #[error("o cofre foi escrito por uma versão mais recente da app; atualiza a app")]
+    UpdateRequired,
     #[error("parâmetros do Argon2id inválidos")]
     InvalidKdfParams,
+    /// Não há nenhuma entrada com este id (ou o id nem é válido).
+    #[error("entrada não encontrada")]
+    EntryNotFound,
     #[error("id de dispositivo inválido")]
     InvalidDeviceId,
     #[error("o gerador de aleatoriedade do sistema falhou")]

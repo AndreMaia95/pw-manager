@@ -6,7 +6,7 @@ use crate::crypto;
 pub(crate) const ID_LEN: usize = 16;
 
 /// Identificador aleatório de 128 bits, mostrado em hexadecimal minúsculo.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct Id(pub(crate) [u8; ID_LEN]);
 
 impl Id {

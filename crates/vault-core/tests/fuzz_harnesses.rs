@@ -7,12 +7,32 @@ mod common;
 
 use std::fs;
 
+use common::cbor::{array, bytes, map, text, uint};
 use common::vector_dirs;
 use proptest::prelude::*;
 use vault_core::fuzzing;
 
 /// Um corpo de réplica válido em CBOR: `{"created_at_ms": 0}`.
 const REPLICA_BODY_SEED: &[u8] = b"\xa1\x6dcreated_at_ms\x00";
+
+/// Um corpo com uma entrada e um campo desconhecido no corpo e outro na
+/// entrada, pela ordem canónica (ADR-0008).
+fn replica_body_with_entries_seed() -> Vec<u8> {
+    let entry = map(&[
+        ("id", bytes(&[0x5a; 16])),
+        ("url", text("https://a.pt")),
+        ("notes", text("n")),
+        ("title", text("a.pt")),
+        ("colour", b"\x9f\x01\xff".to_vec()),
+        ("password", text("p")),
+        ("username", text("u")),
+    ]);
+    map(&[
+        ("created_at_ms", uint(0)),
+        ("entries", array(&[entry])),
+        ("from_v1_1", b"\xa1\x61a\x01".to_vec()),
+    ])
+}
 
 #[test]
 fn the_keyring_reader_survives_every_vector_and_its_mutations() {
@@ -31,6 +51,19 @@ fn the_replica_reader_survives_every_vector_and_its_mutations() {
 #[test]
 fn the_replica_body_decoder_survives_a_valid_body_and_its_mutations() {
     for_each_mutation(REPLICA_BODY_SEED, fuzzing::replica_body);
+}
+
+#[test]
+fn the_replica_body_decoder_survives_a_body_with_entries_and_its_mutations() {
+    for_each_mutation(&replica_body_with_entries_seed(), fuzzing::replica_body);
+}
+
+#[test]
+fn a_deeply_nested_unknown_value_is_rejected_without_exhausting_the_stack() {
+    let deeply_nested = [vec![0x81; 100_000], vec![0x00]].concat();
+    let body = map(&[("created_at_ms", uint(0)), ("from_v1_1", deeply_nested)]);
+
+    fuzzing::replica_body(&body);
 }
 
 proptest! {

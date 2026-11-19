@@ -87,12 +87,20 @@ fn a_replica_with_any_header_byte_changed_is_rejected() {
     for index in 0..REPLICA_HEADER_LEN {
         let mut tampered = original.clone();
         tampered[index] ^= 0x01;
+
+        // Uma versão principal mais recente não é lida e pede atualização
+        // (ADR-0008); qualquer outra alteração é rejeitada.
+        let expected = if u16::from_be_bytes([tampered[4], tampered[5]]) > 1 {
+            VaultError::UpdateRequired
+        } else {
+            VaultError::ReplicaRejected
+        };
         env.folder.put_replica(&device_id, tampered);
 
         let vault = device.open_vault(&device_id);
         assert_eq!(
             vault.unlock_with_master_password(PASSWORD),
-            Err(VaultError::ReplicaRejected),
+            Err(expected),
             "byte {index} do cabeçalho alterado"
         );
         assert!(vault.is_locked());
