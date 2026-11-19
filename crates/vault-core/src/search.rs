@@ -14,11 +14,13 @@ pub(crate) struct Query(Vec<Zeroizing<String>>);
 
 impl Query {
     /// Divide o texto pelos espaços. Uma palavra que seja um URL colado perde o
-    /// esquema e o `www.`, como o campo URL. Sem palavras, encontra tudo.
+    /// esquema e o `www.`, como o campo URL, e um esquema ainda a ser escrito
+    /// (`http:`, `https:/`) é ignorado. Sem palavras, encontra tudo.
     pub(crate) fn new(text: &str) -> Self {
         let folded = fold_case_and_accents(text);
         let words = folded
             .split_whitespace()
+            .filter(|word| !is_scheme_being_typed(word))
             .map(without_url_prefix)
             .filter(|word| !word.is_empty())
             .map(|word| Zeroizing::new(word.to_owned()))
@@ -40,11 +42,19 @@ impl Query {
     }
 }
 
+const URL_SCHEMES: [&str; 2] = ["https://", "http://"];
+
+/// Se a palavra é o início de um esquema, já com os dois pontos (`http:`,
+/// `https:/`). Sem eles, `http` é uma palavra como as outras.
+fn is_scheme_being_typed(word: &str) -> bool {
+    word.contains(':') && URL_SCHEMES.iter().any(|scheme| scheme.starts_with(word))
+}
+
 /// O texto sem `http://` ou `https://` à cabeça e depois sem `www.`. Recebe
 /// texto já em minúsculas.
 fn without_url_prefix(text: &str) -> &str {
     let text = text.trim_start();
-    let text = ["https://", "http://"]
+    let text = URL_SCHEMES
         .into_iter()
         .find_map(|scheme| text.strip_prefix(scheme))
         .unwrap_or(text);

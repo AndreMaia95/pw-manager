@@ -227,3 +227,29 @@ fn every_word_must_appear_in_some_field_but_not_all_in_the_same_one() {
     assert_eq!(titles_found(&vault, "git pedro"), [""; 0]);
     assert_eq!(titles_found(&vault, "https://github.com andre"), ["GitHub"]);
 }
+
+#[test]
+fn a_scheme_still_being_typed_is_ignored_like_a_complete_one() {
+    let vault = new_vault();
+    vault
+        .create_entry(entry("GitHub", "https://github.com", "andre"))
+        .unwrap();
+    vault
+        .create_entry(entry("Banco", "https://bank.pt", "andre"))
+        .unwrap();
+
+    for query in ["http:", "http:/", "https:", "HTTPS:/", "https://"] {
+        assert_eq!(
+            titles_found(&vault, query),
+            ["Banco", "GitHub"],
+            "pesquisa {query:?}"
+        );
+        assert_eq!(
+            titles_found(&vault, &format!("{query} git")),
+            ["GitHub"],
+            "pesquisa {query:?} git"
+        );
+    }
+    // Sem os dois pontos ainda não é um esquema: é uma palavra como as outras.
+    assert_eq!(titles_found(&vault, "http"), [""; 0]);
+}
