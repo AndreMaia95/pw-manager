@@ -3,8 +3,8 @@
 # - Linux, a cada push e em pull requests: formatação, lints, todos os testes
 #   (incluindo os vetores de teste fixos) e uma execução curta de cada alvo de
 #   fuzzing.
-# - macOS e Windows: só uma vez por semana e quando lançado à mão
-#   (Actions > CI > Run workflow), para poupar minutos.
+# - macOS e Windows: a cada push, uma vez por semana e quando lançado à mão
+#   (Actions > CI > Run workflow). Não correm em pull requests.
 #
 # Sem segredos nem dados reais: os vetores de teste usam uma palavra-passe
 # conhecida e não protegem nada (tests/vectors/README.md).
@@ -100,7 +100,7 @@ jobs:
 
   other-os:
     name: ${{ matrix.os }} (testes)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
