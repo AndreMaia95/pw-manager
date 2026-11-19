@@ -182,8 +182,9 @@ impl Vault {
         Ok(entries)
     }
 
-    /// As entradas com `query` no título, no URL ou no utilizador, só com
-    /// metadados e pela ordem de [`Vault::list_entries`].
+    /// As entradas em que cada palavra de `query` aparece no título, no URL
+    /// (sem o esquema nem o `www.`) ou no utilizador, sem distinguir maiúsculas
+    /// nem acentos. Só com metadados e pela ordem de [`Vault::list_entries`].
     pub fn search(&self, query: &str) -> Result<Vec<EntrySummary>, VaultError> {
         let query = Query::new(query);
         let mut entries = self.list_entries()?;

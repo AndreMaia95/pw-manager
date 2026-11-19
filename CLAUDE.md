@@ -1,5 +1,7 @@
 # pw-manager
 
+Responde sempre em português de Portugal.
+
 ## Agent skills
 
 ### Issue tracker

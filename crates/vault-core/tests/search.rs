@@ -173,3 +173,57 @@ fn compatibility_forms_and_special_capitals_are_folded_too() {
     assert_eq!(titles_found(&vault, "nas"), ["ＮＡＳ"]);
     assert_eq!(titles_found(&vault, "notificacoes"), ["Notiﬁcações"]);
 }
+
+#[test]
+fn the_url_scheme_and_www_prefix_are_not_searched() {
+    let vault = new_vault();
+    vault
+        .create_entry(entry("Banco", "HTTPS://www.bank.pt/login", "andre"))
+        .unwrap();
+    vault
+        .create_entry(entry("Router", "http://192.168.1.1", "admin"))
+        .unwrap();
+    vault
+        .create_entry(entry("WWW Admin", "https://painel.example.org", "andre"))
+        .unwrap();
+
+    for query in ["http", "https", "s://", "://"] {
+        assert_eq!(titles_found(&vault, query), [""; 0], "pesquisa {query:?}");
+    }
+    // O título não é um URL: "www" continua a encontrá-lo.
+    assert_eq!(titles_found(&vault, "www"), ["WWW Admin"]);
+    assert_eq!(titles_found(&vault, "bank.pt/log"), ["Banco"]);
+}
+
+#[test]
+fn a_pasted_url_finds_its_entry_whatever_the_scheme() {
+    let vault = new_vault();
+    vault
+        .create_entry(entry("Banco", "https://bank.pt/login", "andre"))
+        .unwrap();
+
+    assert_eq!(titles_found(&vault, "https://www.bank.pt/login"), ["Banco"]);
+    assert_eq!(titles_found(&vault, "http://bank.pt"), ["Banco"]);
+    assert_eq!(titles_found(&vault, "www.bank"), ["Banco"]);
+}
+
+#[test]
+fn every_word_must_appear_in_some_field_but_not_all_in_the_same_one() {
+    let vault = new_vault();
+    vault
+        .create_entry(entry("GitHub", "https://github.com/login", "andre"))
+        .unwrap();
+    vault
+        .create_entry(entry("GitLab", "https://gitlab.com", "maria"))
+        .unwrap();
+    vault
+        .create_entry(entry("Banco", "https://bank.pt", "andre"))
+        .unwrap();
+
+    assert_eq!(titles_found(&vault, "git andre"), ["GitHub"]);
+    assert_eq!(titles_found(&vault, "  andre \t GIT  "), ["GitHub"]);
+    assert_eq!(titles_found(&vault, "git"), ["GitHub", "GitLab"]);
+    assert_eq!(titles_found(&vault, "git maria lab"), ["GitLab"]);
+    assert_eq!(titles_found(&vault, "git pedro"), [""; 0]);
+    assert_eq!(titles_found(&vault, "https://github.com andre"), ["GitHub"]);
+}

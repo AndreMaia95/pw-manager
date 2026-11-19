@@ -9,20 +9,46 @@ use zeroize::Zeroizing;
 
 use crate::entry::EntrySummary;
 
-/// O texto de uma pesquisa, já normalizado.
-pub(crate) struct Query(Zeroizing<String>);
+/// O texto de uma pesquisa, dividido em palavras já normalizadas.
+pub(crate) struct Query(Vec<Zeroizing<String>>);
 
 impl Query {
+    /// Divide o texto pelos espaços. Uma palavra que seja um URL colado perde o
+    /// esquema e o `www.`, como o campo URL. Sem palavras, encontra tudo.
     pub(crate) fn new(text: &str) -> Self {
-        Self(fold_case_and_accents(text.trim()))
+        let folded = fold_case_and_accents(text);
+        let words = folded
+            .split_whitespace()
+            .map(without_url_prefix)
+            .filter(|word| !word.is_empty())
+            .map(|word| Zeroizing::new(word.to_owned()))
+            .collect();
+        Self(words)
     }
 
-    /// Se o título, o URL ou o utilizador da entrada contêm o texto pesquisado.
+    /// Se cada palavra aparece no título, no URL ou no utilizador da entrada,
+    /// não necessariamente todas no mesmo campo. No URL, o esquema e o `www.`
+    /// não contam.
     pub(crate) fn matches(&self, entry: &EntrySummary) -> bool {
-        [&entry.title, &entry.url, &entry.username]
-            .into_iter()
-            .any(|field| fold_case_and_accents(field).contains(self.0.as_str()))
+        let title = fold_case_and_accents(&entry.title);
+        let url = fold_case_and_accents(&entry.url);
+        let username = fold_case_and_accents(&entry.username);
+        let fields = [title.as_str(), without_url_prefix(&url), username.as_str()];
+        self.0
+            .iter()
+            .all(|word| fields.iter().any(|field| field.contains(word.as_str())))
     }
+}
+
+/// O texto sem `http://` ou `https://` à cabeça e depois sem `www.`. Recebe
+/// texto já em minúsculas.
+fn without_url_prefix(text: &str) -> &str {
+    let text = text.trim_start();
+    let text = ["https://", "http://"]
+        .into_iter()
+        .find_map(|scheme| text.strip_prefix(scheme))
+        .unwrap_or(text);
+    text.strip_prefix("www.").unwrap_or(text)
 }
 
 /// Minúsculas, sem acentos e sem formas de compatibilidade: decompõe (NFKD) e
