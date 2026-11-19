@@ -4,7 +4,7 @@
 
 **Blocked by:** 02
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] Existe um conjunto de vetores para a versão 1 do formato (réplica e chaveiro) com o estado esperado
 - [x] Um teste abre cada vetor com a versão atual e compara com o estado esperado

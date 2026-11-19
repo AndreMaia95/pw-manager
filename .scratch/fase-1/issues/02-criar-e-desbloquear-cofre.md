@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] Criar o cofre escreve um chaveiro e a réplica deste dispositivo na pasta do cofre em memória
 - [x] Desbloquear com a palavra-passe mestra correta funciona; com uma errada falha sem revelar porquê

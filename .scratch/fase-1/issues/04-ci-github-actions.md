@@ -4,7 +4,7 @@
 
 **Blocked by:** 03
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] Um workflow corre a cada push e em pull requests
 - [x] Corre formatação, lints e todos os testes do vault-core em Linux a cada push e em pull requests
@@ -28,5 +28,7 @@
 
 - Linux, macOS e Windows: 41 testes, incluindo os ignorados (calibração do Argon2id de produção), os vetores, os harnesses de fuzzing em stable e `derives_the_same_key_as_libsodium`. Em Windows a libsodium MSVC ligou-se e o teste passou; o linker dá 50 avisos `LNK4099` (falta o `.pdb` dos binários da libsodium), que são inofensivos.
 - Fuzzing: 61 s por alvo, sem falhas: `keyring` 1 061 658 inputs, `replica` 1 436 871, `replica_body` 1 610 038.
-- "Um teste a falhar faz o workflow falhar" está garantido pela forma como o workflow foi feito, e não foi provado com um teste a falhar de propósito: cada passo falha com o código de saída do `cargo` e o run falha com qualquer job a falhar. Nas execuções de 2026-11-16 os jobs que não arrancaram fizeram o run acabar em `failure`.
+- "Um teste a falhar faz o workflow falhar", provado em 2026-11-19 com um teste que falha de propósito (`assert_eq!(1 + 1, 3)`) num ramo temporário, `ci-failing-test-probe`, já apagado no repositório local e no remoto:
+  - run 44618773808 (commit 7f94a31): `failure`. Em Linux, macOS e Windows o passo "Testes" falhou com `this_test_fails_on_purpose ... FAILED` e "Process completed with exit code 101". O fuzzing passou, como era de esperar, porque não corre testes.
+  - run 44618135944 (commit 44f943c, a primeira tentativa): também `failure`. O ficheiro do teste não estava formatado, por isso o Linux falhou antes, no passo "Formatação", o que prova que a formatação também faz o workflow falhar. O macOS e o Windows falharam em "Testes".
 - Antes disso, as execuções de 2026-11-16 não correram porque a conta do GitHub estava bloqueada por um problema de faturação ("The job was not started because your account is locked due to a billing issue"). O suporte do GitHub desbloqueou-a.
