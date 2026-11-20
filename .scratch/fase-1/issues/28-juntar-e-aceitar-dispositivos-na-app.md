@@ -11,3 +11,8 @@
 - [ ] Os dispositivos conhecidos mostram o pedido com a mesma impressão digital, para aceitar ou recusar
 - [ ] Lista de dispositivos conhecidos com nome e data de aceitação; renomear e remover
 - [ ] Alertas visíveis para réplicas desconhecidas ou rejeitadas
+
+## Comments
+
+**Nota do ticket 09 (2026-11-20).** `Vault::merge` devolve `MergeReport::devices_with_clock_ahead`: os dispositivos com carimbos mais de 24 h à frente do relógio deste dispositivo (relógio provavelmente errado). A fusão faz-se na mesma. O alerta na app é deste ticket.
+

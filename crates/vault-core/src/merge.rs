@@ -21,6 +21,11 @@ pub struct MergeReport {
     /// As réplicas de outros dispositivos que ficaram de fora da fusão, pela
     /// ordem do id do dispositivo.
     pub skipped: Vec<SkippedReplica>,
+    /// Os ids dos dispositivos que escreveram, nas réplicas fundidas, carimbos
+    /// com a data do seu relógio mais de 24 h à frente do relógio deste
+    /// dispositivo, por ordem. O relógio de um deles (ou o deste) está
+    /// provavelmente errado. Só informa: a fusão faz-se na mesma (ADR-0003).
+    pub devices_with_clock_ahead: Vec<String>,
 }
 
 /// Uma réplica de outro dispositivo que ficou de fora da fusão. O estado do

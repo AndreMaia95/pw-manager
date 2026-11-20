@@ -40,6 +40,14 @@
 - Fuzzing curto local: `merge` (60 s, cerca de 3,3 milhões de execuções) e `replica_body` (45 s), sem falhas. O alvo `merge` encontrou uma ordem em memória dos campos desconhecidos fundidos diferente da do leitor, já corrigida.
 - Fica em aberto, por decisão:
   - Se uma entrada expira no Lixo de um dispositivo antes de ele ver uma recuperação feita noutro, a lápide apaga o histórico anterior à ida para o Lixo, e a entrada recuperada continua sem ele.
-  - Com um relógio adiantado, a data de uma versão perdida numa fusão pode ficar no futuro.
+  - Com um relógio adiantado, a data de uma versão perdida numa fusão pode ficar no futuro (ver o acrescento abaixo).
 - Exceção temporária ao ADR-0012 (só réplicas de dispositivos conhecidos entram na fusão): nesta fatia entram todas. Os tickets 10 e 11 fecham isto antes de qualquer distribuição.
+
+**Acrescento (2026-11-20), decisões do utilizador.** Aceites: o histórico apagado numa entrada recuperada depois de expirar noutro dispositivo, os campos desconhecidos de uma entrada que perde a fusão não irem para o histórico, e a exceção temporária ao ADR-0012. Para o relógio adiantado, foi pedida uma salvaguarda:
+
+- `MergeReport::devices_with_clock_ahead`: os ids dos dispositivos que escreveram, nas réplicas fundidas, carimbos com a data do seu relógio mais de 24 h à frente do relógio deste dispositivo. Só informa: a fusão faz-se na mesma. Os alertas na app ficam para o ticket 28.
+- Só contam os carimbos com contador zero, cuja data veio do relógio de parede de quem os escreveu. Um dispositivo que funde um carimbo do futuro e edita a seguir herda essa data com o contador acima de zero, e não é assinalado: o relógio errado não é o dele. Por isso assinala-se o dispositivo que escreveu o carimbo, e não o dono da réplica.
+- Deixa de assinalar quando o relógio deste dispositivo chega à data dos carimbos. Também assinala se o relógio errado for o deste dispositivo (atrasado mais de 24 h).
+- `Vault::join` não devolve relatório: a app chama `merge()` a seguir para o obter.
+- Testes: `a_device_whose_stamps_are_more_than_a_day_ahead_is_reported_without_blocking_the_merge` e `stamps_up_to_a_day_ahead_are_not_reported`, em `tests/merge.rs`.
 

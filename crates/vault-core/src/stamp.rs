@@ -15,6 +15,7 @@
 //! BE | id do dispositivo (16). Os dados escritos antes de haver carimbos não
 //! o têm, e ficam com [`Stamp::BEFORE_STAMPS`], anterior a todos os outros.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 use crate::cbor::{self, MapReader, MapWriter};
@@ -22,6 +23,10 @@ use crate::ids::{self, DeviceId, ID_LEN, Id};
 use crate::replica::ReplicaBody;
 
 const STAMP_LEN: usize = 8 + 4 + ID_LEN;
+
+/// Quanto à frente do relógio deste dispositivo pode estar a data de um
+/// carimbo sem que o relógio de quem o escreveu pareça errado: 24 h.
+const CLOCK_AHEAD_TOLERANCE_MS: i64 = 24 * 60 * 60 * 1000;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct Stamp {
@@ -67,6 +72,15 @@ impl Stamp {
 
     pub(crate) fn is_before_stamps(self) -> bool {
         self == Self::BEFORE_STAMPS
+    }
+
+    /// O dispositivo que escreveu este carimbo, se a data dele vier do seu
+    /// relógio de parede e estiver mais de 24 h à frente de `now_ms`. Um
+    /// carimbo com o contador acima de zero tem a data de um carimbo que o
+    /// dispositivo já conhecia, talvez de outro: não diz nada do seu relógio.
+    fn device_with_clock_ahead(self, now_ms: i64) -> Option<DeviceId> {
+        let ahead = self.ms.saturating_sub(now_ms) > CLOCK_AHEAD_TOLERANCE_MS;
+        (self.counter == 0 && ahead).then_some(self.device)
     }
 
     /// A data do carimbo, em milissegundos desde 1970-01-01T00:00:00Z.
@@ -144,6 +158,18 @@ impl fmt::Debug for Stamp {
 }
 
 impl ReplicaBody {
+    /// Os dispositivos com carimbos no corpo cuja data, vinda do relógio de
+    /// cada um, está mais de 24 h à frente de `now_ms`: o relógio deles
+    /// estava provavelmente errado (ou o deste).
+    pub(crate) fn devices_with_clock_ahead(&self, now_ms: i64) -> BTreeSet<DeviceId> {
+        let entries = self.entries.values().flat_map(|entry| entry.stamps());
+        let tombstones = self.tombstones.values().map(|tombstone| tombstone.stamp);
+        entries
+            .chain(tombstones)
+            .filter_map(|stamp| stamp.device_with_clock_ahead(now_ms))
+            .collect()
+    }
+
     /// O carimbo de uma alteração do dispositivo `device` à hora `now_ms`:
     /// maior do que todos os carimbos que o corpo conhece (ADR-0003).
     pub(crate) fn next_stamp(&self, now_ms: i64, device: DeviceId) -> Stamp {

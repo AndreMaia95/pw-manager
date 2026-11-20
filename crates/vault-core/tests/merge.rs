@@ -448,3 +448,57 @@ fn joining_a_vault_with_a_replica_of_a_newer_major_version_asks_for_an_update() 
     );
     assert_eq!(env.folder.replica_device_ids(), [device_a]);
 }
+
+#[test]
+fn a_device_whose_stamps_are_more_than_a_day_ahead_is_reported_without_blocking_the_merge() {
+    let env = TestEnv::new();
+    let [a, b, c] = [env.device(), env.device(), env.device()];
+    let vault_a = a.create_vault(PASSWORD);
+    let vault_b = b.join_vault(PASSWORD);
+    let vault_c = c.join_vault(PASSWORD);
+
+    // O relógio de A está dois dias adiantado quando A cria uma entrada.
+    a.clock.advance(2 * DAY_MS);
+    let banco = vault_a.create_entry(entry("Banco")).unwrap();
+    let report = vault_b.merge().unwrap();
+
+    assert_eq!(report.devices_with_clock_ahead, [vault_a.device_id()]);
+    assert_eq!(titles(&vault_b), ["Banco"], "a fusão não é bloqueada");
+
+    // B edita depois de ver a entrada de A: o seu carimbo herda a data de A,
+    // mas o relógio errado não é o de B.
+    set_password(&vault_b, &banco, "editada em B");
+    env.folder.delete_replica(&vault_a.device_id());
+    let report = vault_c.merge().unwrap();
+    assert_eq!(report.devices_with_clock_ahead, [vault_a.device_id()]);
+    assert_eq!(password(&vault_c, &banco), "editada em B");
+
+    // Quando o relógio de C chega à data dos carimbos, deixa de assinalar.
+    c.clock.advance(DAY_MS);
+    assert_eq!(
+        vault_c.merge().unwrap().devices_with_clock_ahead,
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn stamps_up_to_a_day_ahead_are_not_reported() {
+    let env = TestEnv::new();
+    let [a, b] = [env.device(), env.device()];
+    let vault_a = a.create_vault(PASSWORD);
+    let vault_b = b.join_vault(PASSWORD);
+
+    a.clock.advance(DAY_MS);
+    vault_a.create_entry(entry("Banco")).unwrap();
+    assert_eq!(
+        vault_b.merge().unwrap().devices_with_clock_ahead,
+        Vec::<String>::new()
+    );
+
+    a.clock.advance(1);
+    vault_a.create_entry(entry("Correio")).unwrap();
+    assert_eq!(
+        vault_b.merge().unwrap().devices_with_clock_ahead,
+        [vault_a.device_id()]
+    );
+}

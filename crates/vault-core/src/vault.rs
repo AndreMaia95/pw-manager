@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::crypto::{self, SecretKey};
@@ -399,18 +400,24 @@ impl Vault {
         let mut session = self.session();
         let session = session.as_mut().ok_or(VaultError::Locked)?;
         let (others, skipped) = self.read_other_replicas(&session.vault_key, session.generation)?;
+        let now_ms = self.clock.now_ms();
+        let mut clock_ahead = BTreeSet::new();
         let mut body = session.body.clone();
         for other in others {
+            clock_ahead.extend(other.devices_with_clock_ahead(now_ms));
             body.merge(other);
         }
         // Uma entrada vinda de outra réplica pode já ter expirado no Lixo.
-        body.expire_trash(self.clock.now_ms());
+        body.expire_trash(now_ms);
         if body != session.body || session.unsaved {
             self.write_replica(session, &body)?;
             session.body = body;
             session.unsaved = false;
         }
-        Ok(MergeReport { skipped })
+        Ok(MergeReport {
+            skipped,
+            devices_with_clock_ahead: clock_ahead.iter().map(Id::to_string).collect(),
+        })
     }
 
     /// Cifra o estado atual e escreve a réplica deste dispositivo na pasta do cofre.

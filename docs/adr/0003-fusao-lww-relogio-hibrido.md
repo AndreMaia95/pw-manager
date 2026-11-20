@@ -18,3 +18,5 @@ Decididas ao implementar a fusão (ticket 09), para que ela seja comutativa, ass
 - A lápide criada ao fim de 30 dias no Lixo leva o carimbo da ida para o Lixo, e não um novo. Assim todos os dispositivos dão a mesma lápide, e uma edição ou recuperação feita noutro dispositivo depois da ida para o Lixo ainda lhe ganha.
 - A expiração do Lixo é uma alteração de quem lê, à sua hora, e não faz parte da fusão. Uma versão no Lixo que expira antes de chegar a versão posterior de outra réplica deixa uma lápide que apaga o histórico anterior; os dispositivos convergem quando essa lápide chega a todos.
 - Os campos desconhecidos do corpo de duas réplicas juntam-se. Quando os dois têm a mesma chave com valores diferentes, fica o de maior codificação: esta versão não sabe fundir um campo que não conhece, mas assim a escolha não depende da ordem (ADR-0008).
+- Um relógio muito adiantado não é recusado, porque recusar bloquearia a fusão. Quando uma réplica traz carimbos com a data do relógio de quem os escreveu (contador zero) mais de 24 h à frente do relógio local, a fusão assinala esse dispositivo, para a app avisar.
+

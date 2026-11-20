@@ -495,6 +495,12 @@ impl Entry {
         Some(self)
     }
 
+    /// Os carimbos da versão atual e das versões do histórico.
+    pub(crate) fn stamps(&self) -> impl Iterator<Item = Stamp> + '_ {
+        let history = self.history.iter().map(|version| version.id.stamp());
+        std::iter::once(self.stamp).chain(history)
+    }
+
     /// A entrada e todo o seu histórico são posteriores a `deleted`: uma
     /// lápide com esse carimbo não lhe apaga nada.
     pub(crate) fn is_all_after(&self, deleted: Stamp) -> bool {
