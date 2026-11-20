@@ -73,12 +73,11 @@ pub fn keyring(data: &[u8]) {
         "aceitou um chaveiro fora da codificação canónica"
     );
 
-    // Sem a chave privada, ninguém faz uma assinatura que confira, nem com o
-    // autor do cabeçalho registado com a chave pública dela.
-    let writer = Id(data[24..40].try_into().unwrap());
-    let devices = known_devices(writer);
+    // Sem a chave privada, ninguém faz uma assinatura que confira, seja qual
+    // for o assinante, mesmo registado com a chave pública dela.
+    let public_key = DeviceKey::from_seed(&OWNER_DEVICE_SEED).public_key();
     assert_eq!(
-        keyring.verify(|id| devices::public_key(&devices, id)),
+        keyring.verify(|_| Some(public_key)),
         Err(VaultError::KeyringRejected),
         "aceitou um chaveiro sem assinatura válida"
     );

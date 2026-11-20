@@ -397,7 +397,7 @@ fn a_device_from_before_signatures_gets_a_key_and_signs_its_replica_and_the_keyr
 
     let minor = |bytes: Vec<u8>| u16::from_be_bytes([bytes[6], bytes[7]]);
     assert_eq!(minor(folder.replica(device_id).unwrap()), 1);
-    assert_eq!(minor(folder.keyring().unwrap()), 1);
+    assert_eq!(minor(folder.keyring().unwrap()), 2);
     assert!(local.device_key().is_some());
     let reopened = open(&local);
     reopened.unlock_with_master_password(password).unwrap();
@@ -519,4 +519,125 @@ fn a_device_that_lost_its_key_is_not_migrated_from_an_unsigned_replica_put_in_it
         Err(VaultError::DeviceKeyNotFound)
     );
     assert_eq!(env.folder.keyring(), keyring);
+}
+
+/// O fim de um chaveiro 1.2: o id de quem assina (16) e a assinatura (64).
+const KEYRING_SIGNER_LEN: usize = 16;
+
+/// O chaveiro sem o id de quem assina e a assinatura: o cabeçalho e os
+/// invólucros.
+fn keyring_envelopes(keyring: &[u8]) -> &[u8] {
+    &keyring[..keyring.len() - KEYRING_SIGNER_LEN - SIGNATURE_LEN]
+}
+
+fn keyring_signer(keyring: &[u8]) -> Vec<u8> {
+    let end = keyring.len() - SIGNATURE_LEN;
+    keyring[end - KEYRING_SIGNER_LEN..end].to_vec()
+}
+
+#[test]
+fn removing_the_device_that_signed_the_keyring_makes_this_one_sign_it_with_the_same_envelopes() {
+    let env = TestEnv::new();
+    let [a, b, c] = [env.device(), env.device(), env.device()];
+    let device_a = a.create_vault(PASSWORD).device_id();
+    let vault_b = b.join_vault(PASSWORD);
+    let vault_c = c.join_vault(PASSWORD);
+    let before = env.folder.keyring().unwrap();
+
+    vault_b.remove_device(&device_a).unwrap();
+
+    let after = env.folder.keyring().unwrap();
+    assert_eq!(keyring_envelopes(&after), keyring_envelopes(&before));
+    assert_eq!(keyring_signer(&before), common::from_hex(&device_a));
+    assert_eq!(
+        keyring_signer(&after),
+        common::from_hex(&vault_b.device_id())
+    );
+    for (device, id) in [(&b, vault_b.device_id()), (&c, vault_c.device_id())] {
+        let reopened = device.open_vault(&id);
+        assert_eq!(reopened.unlock_with_master_password(PASSWORD), Ok(()));
+    }
+    assert!(env.device().try_join_vault(PASSWORD).is_ok());
+}
+
+#[test]
+fn removing_a_device_that_did_not_sign_the_keyring_leaves_the_keyring_as_it_is() {
+    let env = TestEnv::new();
+    let [a, b] = [env.device(), env.device()];
+    let vault_a = a.create_vault(PASSWORD);
+    let device_b = b.join_vault(PASSWORD).device_id();
+    vault_a.merge().unwrap();
+    let keyring = env.folder.keyring();
+
+    vault_a.remove_device(&device_b).unwrap();
+
+    assert_eq!(env.folder.keyring(), keyring);
+}
+
+#[test]
+fn a_keyring_signed_by_a_removed_device_is_rejected() {
+    let env = TestEnv::new();
+    let [a, b] = [env.device(), env.device()];
+    let device_a = a.create_vault(PASSWORD).device_id();
+    let vault_b = b.join_vault(PASSWORD);
+    vault_b.remove_device(&device_a).unwrap();
+
+    // A, que tem a sua chave, volta a assinar o chaveiro.
+    testing::resign_keyring(&env.folder, &a.local, PASSWORD).unwrap();
+
+    let reopened = b.open_vault(&vault_b.device_id());
+    assert_eq!(
+        reopened.unlock_with_master_password(PASSWORD),
+        Err(VaultError::KeyringRejected)
+    );
+    assert_eq!(
+        env.device().try_join_vault(PASSWORD).err(),
+        Some(VaultError::KeyringRejected)
+    );
+}
+
+#[test]
+fn a_keyring_of_a_new_generation_written_by_a_removed_device_is_rejected() {
+    let env = TestEnv::new();
+    let [a, b] = [env.device(), env.device()];
+    let device_a = a.create_vault(PASSWORD).device_id();
+    let vault_b = b.join_vault(PASSWORD);
+    vault_b.remove_device(&device_a).unwrap();
+
+    // A escreve uma geração nova do chaveiro, como numa alteração da
+    // palavra-passe mestra.
+    testing::reseal_keyring_as_next_generation(&env.folder, &a.local, PASSWORD).unwrap();
+
+    let reopened = b.open_vault(&vault_b.device_id());
+    assert_eq!(
+        reopened.unlock_with_master_password(PASSWORD),
+        Err(VaultError::KeyringRejected)
+    );
+}
+
+#[test]
+fn a_keyring_of_an_older_version_is_rewritten_in_the_current_one_on_unlock() {
+    let dir = vectors_root().join("v1.1/with-removed-device");
+    let folder = load_vector(&dir);
+    let device_id = "cca662955b39d444b156bee9086d84e4";
+    let password = "vetor de teste v1.1";
+    let local = common::load_vector_local_folder(&dir, device_id);
+    let open = || {
+        Vault::open(
+            Arc::new(folder.clone()),
+            Arc::new(local.clone()),
+            Arc::new(ManualClock::new(common::START_MS)),
+            device_id,
+        )
+        .unwrap()
+    };
+    let minor = |bytes: Vec<u8>| u16::from_be_bytes([bytes[6], bytes[7]]);
+    assert_eq!(minor(folder.keyring().unwrap()), 1);
+
+    open().unlock_with_master_password(password).unwrap();
+
+    let keyring = folder.keyring().unwrap();
+    assert_eq!(minor(keyring.clone()), 2);
+    assert_eq!(keyring_signer(&keyring), common::from_hex(device_id));
+    assert_eq!(open().unlock_with_master_password(password), Ok(()));
 }

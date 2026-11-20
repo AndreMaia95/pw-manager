@@ -445,6 +445,45 @@ const VECTORS: &[FormatVector] = &[
             removed_devices: &["9df2dc81eed85e76bb124438a0e590e4"],
         },
     },
+    // Chaveiro 1.2, com o id de quem assina no fim (ticket 10): o primeiro
+    // dispositivo escreveu os invólucros e foi removido pelo segundo, que o
+    // voltou a assinar. O vetor descreve o segundo; as réplicas ficam em 1.1.
+    FormatVector {
+        path: "v1.2/with-removed-signer",
+        master_password: "vetor de teste v1.2",
+        expected: ExpectedState {
+            vault_id: "5cb9033b42968d3e690e86f13fcaa86d",
+            device_id: "9a8e2ccf891f7d0b0ef62201816146ed",
+            created_at_ms: 1_767_225_600_000,
+            entries: &[
+                ExpectedEntry {
+                    id: "cdaf2fc6a25766de89d2dd49b0a0f09d",
+                    title: "exemplo.pt",
+                    url: "https://www.exemplo.pt/entrar",
+                    username: "utilizador@exemplo.pt",
+                    password: "vetor: palavra-passe 2",
+                    notes: "",
+                    state: EntryState::Active,
+                    history: &[],
+                    generator: DEFAULT_GENERATOR,
+                },
+                ExpectedEntry {
+                    id: "11931aeab6e4922152d1dc9d9eaff3ad",
+                    title: "GitHub",
+                    url: "https://github.com/login",
+                    username: "andre",
+                    password: "vetor: palavra-passe 1",
+                    notes: "vetor: notas 1",
+                    state: EntryState::Active,
+                    history: &[],
+                    generator: DEFAULT_GENERATOR,
+                },
+            ],
+            unknown_fields: &[],
+            tombstones: &[],
+            removed_devices: &["708041a140cd62167f6a55fe8ec24e62"],
+        },
+    },
 ];
 
 #[test]

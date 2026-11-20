@@ -88,7 +88,7 @@ impl ReplicaBody {
 /// A quem a réplica tem de pertencer para ser aceite. Serve também para o
 /// ficheiro da chave do dispositivo, ligado ao mesmo cofre, dispositivo e
 /// geração.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ReplicaOwner {
     pub(crate) vault_id: VaultId,
     pub(crate) device_id: DeviceId,
@@ -160,6 +160,11 @@ impl<'a> SealedReplica<'a> {
     /// dispositivo e da sua geração.
     pub(crate) fn belongs_to(&self, owner: &ReplicaOwner) -> bool {
         self.owner == *owner
+    }
+
+    /// A quem o cabeçalho diz que a réplica pertence.
+    pub(crate) fn owner(&self) -> ReplicaOwner {
+        self.owner
     }
 
     /// É de uma versão com assinatura (1.1 ou mais recente), válida ou não.

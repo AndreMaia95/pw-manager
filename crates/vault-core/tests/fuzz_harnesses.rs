@@ -305,9 +305,10 @@ proptest! {
     }
 }
 
-/// Bytes arbitrários, dois terços das vezes atrás de um cabeçalho de chaveiro
-/// v1.0 (sem assinatura) ou v1.1 (com assinatura no fim) para chegarem ao
-/// descodificador CBOR e à verificação da assinatura.
+/// Bytes arbitrários, três quartos das vezes atrás de um cabeçalho de chaveiro
+/// v1.0 (sem assinatura), v1.1 (com assinatura no fim) ou v1.2 (com o id de
+/// quem assina e a assinatura no fim) para chegarem ao descodificador CBOR e à
+/// verificação da assinatura.
 fn keyring_like_bytes() -> impl Strategy<Value = Vec<u8>> {
     let behind = |header: &'static [u8]| {
         (any::<[u8; 40]>(), any::<Vec<u8>>())
@@ -317,6 +318,7 @@ fn keyring_like_bytes() -> impl Strategy<Value = Vec<u8>> {
         any::<Vec<u8>>(),
         behind(b"PWMK\x00\x01\x00\x00"),
         behind(b"PWMK\x00\x01\x00\x01"),
+        behind(b"PWMK\x00\x01\x00\x02"),
     ]
 }
 

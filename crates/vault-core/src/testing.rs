@@ -283,6 +283,40 @@ pub fn reseal_keyring(
     signer: &MemoryLocalFolder,
     master_password: &str,
 ) -> Result<(), VaultError> {
+    reseal_keyring_at(folder, signer, master_password, 0)
+}
+
+/// Como [`reseal_keyring`], mas numa geração nova, a seguinte à do chaveiro
+/// da pasta: como uma alteração da palavra-passe mestra.
+pub fn reseal_keyring_as_next_generation(
+    folder: &MemoryVaultFolder,
+    signer: &MemoryLocalFolder,
+    master_password: &str,
+) -> Result<(), VaultError> {
+    reseal_keyring_at(folder, signer, master_password, 1)
+}
+
+/// Assina de novo o chaveiro da pasta com a chave do dispositivo cuja pasta
+/// local é `signer`, sem mudar o cabeçalho nem os invólucros.
+pub fn resign_keyring(
+    folder: &MemoryVaultFolder,
+    signer: &MemoryLocalFolder,
+    master_password: &str,
+) -> Result<(), VaultError> {
+    let keyring = Keyring::decode(&folder.keyring().ok_or(VaultError::VaultNotFound)?)?;
+    let vault_key = keyring.open_master_password_envelope(master_password)?;
+    let file = signer.device_key().ok_or(VaultError::DeviceKeyNotFound)?;
+    let (owner, key) = DeviceKey::open(&file, &vault_key)?;
+    folder.put_keyring(keyring.resign(owner.device_id, &key)?);
+    Ok(())
+}
+
+fn reseal_keyring_at(
+    folder: &MemoryVaultFolder,
+    signer: &MemoryLocalFolder,
+    master_password: &str,
+    generations_ahead: u64,
+) -> Result<(), VaultError> {
     let keyring = Keyring::decode(&folder.keyring().ok_or(VaultError::VaultNotFound)?)?;
     let vault_key = keyring.open_master_password_envelope(master_password)?;
     let file = signer.device_key().ok_or(VaultError::DeviceKeyNotFound)?;
@@ -291,7 +325,7 @@ pub fn reseal_keyring(
         keyring.vault_id(),
         owner.device_id,
         &key,
-        keyring.generation(),
+        keyring.generation() + generations_ahead,
         &vault_key,
         master_password,
         keyring.master_password_kdf(),

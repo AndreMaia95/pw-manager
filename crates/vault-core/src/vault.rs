@@ -118,7 +118,7 @@ impl Vault {
     ///
     /// Só entram as réplicas que [`Vault::merge`] aceita. Como este
     /// dispositivo ainda não conhece nenhum, a primeira a entrar é a do
-    /// dispositivo que escreveu o chaveiro, e as dos dispositivos que essa
+    /// dispositivo que assinou o chaveiro, e as dos dispositivos que essa
     /// regista têm de estar assinadas pelas chaves que ela lhes dá. O chaveiro
     /// tem de estar assinado por um dispositivo conhecido das réplicas que
     /// entraram; se não estiver, dá [`VaultError::KeyringRejected`] sem
@@ -145,8 +145,7 @@ impl Vault {
             session: Mutex::new(None),
         };
         let generation = keyring.generation();
-        let merged =
-            vault.merge_other_replicas(&vault_key, generation, None, Some(keyring.writer()))?;
+        let merged = vault.merge_other_replicas(&vault_key, generation, None, keyring.signer())?;
         if merged
             .skipped
             .iter()
@@ -155,11 +154,11 @@ impl Vault {
             return Err(VaultError::UpdateRequired);
         }
         // Um cofre sem nenhuma réplica que entre começa vazio, criado agora;
-        // mas então ninguém conhece quem escreveu o chaveiro.
+        // mas então ninguém conhece quem assinou o chaveiro.
         let mut body = merged
             .body
             .unwrap_or_else(|| ReplicaBody::empty(vault.clock.now_ms()));
-        keyring.verify(|id| devices::public_key(&body.devices, id))?;
+        keyring.verify(|id| devices::signing_public_key(&body.devices, id))?;
         let device_key = DeviceKey::generate()?;
         body.register_device(vault.device_id, device_key.public_key());
         vault
@@ -199,11 +198,15 @@ impl Vault {
     /// chaveiro, lê a chave deste dispositivo da pasta local e a réplica deste
     /// dispositivo, que tem de estar assinada por ela. O chaveiro tem de estar
     /// assinado por este dispositivo ou por um que a réplica regista como
-    /// conhecido.
+    /// conhecido e não removido. Só depois se compara a geração do chaveiro
+    /// com a da réplica e a da chave.
     ///
-    /// Um dispositivo de antes das assinaturas (só os vetores de teste 1.0)
-    /// não tem chave na pasta local e tem uma réplica 1.0, sem assinatura: é
-    /// migrado aqui (ver `Vault::migrate_to_signatures`).
+    /// Um chaveiro de uma versão do formato anterior é reescrito na versão
+    /// atual, com um invólucro novo da mesma palavra-passe mestra, assinado
+    /// por este dispositivo; se a escrita falhar, o desbloqueio não falha por
+    /// isso. Um dispositivo de antes das assinaturas (só os vetores de teste
+    /// 1.0) não tem chave na pasta local e tem uma réplica 1.0, sem
+    /// assinatura: é migrado aqui (ver `Vault::migrate_to_signatures`).
     pub fn unlock_with_master_password(&self, master_password: &str) -> Result<(), VaultError> {
         let keyring = read_keyring(self.storage.as_ref())?;
         if keyring.vault_id() != self.vault_id {
@@ -211,18 +214,21 @@ impl Vault {
         }
         let vault_key = keyring.open_master_password_envelope(master_password)?;
         let owner = self.owner(keyring.generation());
+        let same_device = |other: &ReplicaOwner| {
+            other.vault_id == owner.vault_id && other.device_id == owner.device_id
+        };
         let bytes = self
             .storage
             .read_replica(self.device_id())?
             .ok_or(VaultError::ReplicaNotFound)?;
         let sealed = SealedReplica::parse(&bytes)?;
-        if !sealed.belongs_to(&owner) {
+        if !same_device(&sealed.owner()) {
             return Err(VaultError::ReplicaRejected);
         }
         let mut session = match self.local.read_device_key()? {
             Some(file) => {
                 let (key_owner, device_key) = DeviceKey::open(&file, &vault_key)?;
-                if key_owner != owner {
+                if !same_device(&key_owner) {
                     return Err(VaultError::DeviceKeyRejected);
                 }
                 if !sealed.is_signed_by(&device_key.public_key()) {
@@ -234,8 +240,16 @@ impl Vault {
                 let own_key = device_key.public_key();
                 keyring.verify(|id| match id == self.device_id {
                     true => Some(own_key),
-                    false => devices::public_key(&body.devices, id),
+                    false => devices::signing_public_key(&body.devices, id),
                 })?;
+                // A geração nova de um chaveiro autêntico é assunto da
+                // alteração da palavra-passe mestra (ticket 14).
+                if sealed.owner() != owner {
+                    return Err(VaultError::ReplicaRejected);
+                }
+                if key_owner != owner {
+                    return Err(VaultError::DeviceKeyRejected);
+                }
                 Session {
                     vault_key,
                     device_key,
@@ -245,8 +259,12 @@ impl Vault {
                 }
             }
             None if sealed.is_signed() => return Err(VaultError::DeviceKeyNotFound),
+            None if sealed.owner() != owner => return Err(VaultError::ReplicaRejected),
             None => self.migrate_to_signatures(&keyring, &sealed, vault_key, master_password)?,
         };
+        if !keyring.is_current_version() {
+            let _ = self.rewrite_keyring(&keyring, &session, master_password);
+        }
         if session.body.expire_trash(self.clock.now_ms()) {
             // As entradas que expiraram no Lixo saem já da réplica. Se a
             // escrita falhar, o desbloqueio não falha por isso: saem da
@@ -254,6 +272,29 @@ impl Vault {
             session.unsaved = self.write_replica(&session, &session.body).is_err();
         }
         *self.session() = Some(session);
+        Ok(())
+    }
+
+    /// Escreve o chaveiro na versão atual do formato, com um invólucro novo da
+    /// mesma palavra-passe mestra, da mesma chave do cofre, dos mesmos
+    /// parâmetros do Argon2id e da mesma geração, escrito e assinado por este
+    /// dispositivo.
+    fn rewrite_keyring(
+        &self,
+        keyring: &Keyring,
+        session: &Session,
+        master_password: &str,
+    ) -> Result<(), VaultError> {
+        let rewritten = Keyring::seal(
+            self.vault_id,
+            self.device_id,
+            &session.device_key,
+            session.generation,
+            &session.vault_key,
+            master_password,
+            keyring.master_password_kdf(),
+        )?;
+        self.storage.write_keyring(rewritten)?;
         Ok(())
     }
 
@@ -288,15 +329,6 @@ impl Vault {
         let generation = keyring.generation();
         let device_key = DeviceKey::generate()?;
         body.register_device(self.device_id, device_key.public_key());
-        let signed_keyring = Keyring::seal(
-            self.vault_id,
-            self.device_id,
-            &device_key,
-            generation,
-            &vault_key,
-            master_password,
-            keyring.master_password_kdf(),
-        )?;
         let session = Session {
             vault_key,
             device_key,
@@ -310,7 +342,8 @@ impl Vault {
                 .seal(&self.owner(generation), &session.vault_key)?,
         )?;
         self.write_replica(&session, &session.body)?;
-        self.storage.write_keyring(signed_keyring)?;
+        // Sem o chaveiro assinado, o próximo desbloqueio falharia.
+        self.rewrite_keyring(keyring, &session, master_password)?;
         Ok(session)
     }
 
@@ -553,21 +586,53 @@ impl Vault {
 
     /// Marca o dispositivo `device_id` como removido na lista de dispositivos
     /// conhecidos, e escreve a réplica. A marca é definitiva: a réplica dele
-    /// deixa de entrar na fusão, e nenhuma fusão o volta a tornar conhecido.
-    /// Apagar a sua réplica da pasta do cofre fica para o ticket 11.
+    /// deixa de entrar na fusão, nenhuma fusão o volta a tornar conhecido, e
+    /// um chaveiro assinado por ele deixa de ser aceite. Apagar a sua réplica
+    /// da pasta do cofre fica para o ticket 11.
+    ///
+    /// Se foi ele que assinou o chaveiro atual, este dispositivo volta a
+    /// assiná-lo antes de escrever a réplica, com o cabeçalho e os invólucros
+    /// iguais. Se isso falhar, nada muda.
     pub fn remove_device(&self, device_id: &str) -> Result<(), VaultError> {
         let id = Id::from_hex(device_id).ok_or(VaultError::DeviceNotFound)?;
         if id == self.device_id {
             return Err(VaultError::CannotRemoveThisDevice);
         }
-        self.change(|body| {
-            let device = body
-                .devices
-                .get_mut(&id)
-                .ok_or(VaultError::DeviceNotFound)?;
-            device.removed = true;
-            Ok(())
-        })
+        let mut session = self.session();
+        let session = session.as_mut().ok_or(VaultError::Locked)?;
+        self.expire_trash(session);
+        let mut body = session.body.clone();
+        let device = body
+            .devices
+            .get_mut(&id)
+            .ok_or(VaultError::DeviceNotFound)?;
+        device.removed = true;
+        self.resign_keyring_signed_by(id, session)?;
+        self.write_replica(session, &body)?;
+        session.body = body;
+        session.unsaved = false;
+        Ok(())
+    }
+
+    /// Se o chaveiro da pasta foi assinado por `removed`, verifica-o com a
+    /// lista de dispositivos atual e assina-o de novo com a chave deste
+    /// dispositivo. Nunca assina um chaveiro que não aceitaria.
+    fn resign_keyring_signed_by(
+        &self,
+        removed: DeviceId,
+        session: &Session,
+    ) -> Result<(), VaultError> {
+        let keyring = read_keyring(self.storage.as_ref())?;
+        if keyring.signer() != Some(removed) {
+            return Ok(());
+        }
+        if keyring.vault_id() != self.vault_id || keyring.generation() != session.generation {
+            return Err(VaultError::KeyringRejected);
+        }
+        keyring.verify(|id| devices::signing_public_key(&session.body.devices, id))?;
+        let resigned = keyring.resign(self.device_id, &session.device_key)?;
+        self.storage.write_keyring(resigned)?;
+        Ok(())
     }
 
     /// Cifra o estado atual e escreve a réplica deste dispositivo na pasta do cofre.

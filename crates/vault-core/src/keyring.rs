@@ -1,28 +1,38 @@
 //! Chaveiro: o ficheiro partilhado na pasta do cofre com os invólucros da chave
 //! do cofre (ADR-0004, ADR-0006).
 //!
-//! Formato (versão 1.1):
+//! Formato (versão 1.2):
 //!
 //! ```text
 //! cabeçalho em claro (48 bytes)
 //!   "PWMK" | versão principal u16 BE | versão secundária u16 BE
-//!   | id do cofre (16) | id do dispositivo que o escreveu (16) | geração u64 BE
+//!   | id do cofre (16) | id do dispositivo que escreveu os invólucros (16)
+//!   | geração u64 BE
 //! corpo em CBOR, em claro, com os invólucros
-//! assinatura Ed25519 (64 bytes) do dispositivo que o escreveu, de
-//!   "pw-manager/signature/keyring" | cabeçalho | corpo
+//! id do dispositivo que assina (16)
+//! assinatura Ed25519 (64 bytes) desse dispositivo, de
+//!   "pw-manager/signature/keyring" | cabeçalho | corpo | id de quem assina
 //! ```
 //!
 //! A assinatura entrou na versão 1.1 (ticket 10, ADR-0006): os chaveiros 1.0
-//! acabam no corpo. O chaveiro só é aceite se estiver assinado por um
-//! dispositivo da lista de dispositivos conhecidos, com a chave registada dele
-//! ([`Keyring::verify`]). Essa lista está nas réplicas, cifradas com a chave do
-//! cofre que sai do chaveiro: por isso a assinatura só se verifica depois de
+//! acabam no corpo, e nos 1.1 a assinatura é só a do dispositivo do cabeçalho,
+//! sem o id de quem assina. Na 1.2 quem assina passou para o fim do ficheiro,
+//! fora do cabeçalho e por isso fora do AAD dos invólucros: outro dispositivo
+//! pode voltar a assinar o chaveiro sem mudar nenhum invólucro
+//! ([`Keyring::resign`]), p. ex. quando quem o assinou é removido.
+//!
+//! O chaveiro só é aceite se estiver assinado por um dispositivo da lista de
+//! dispositivos conhecidos, não removido, com a chave registada dele
+//! ([`Keyring::verify`]). Essa lista está nas réplicas, cifradas com a chave
+//! do cofre que sai do chaveiro: por isso a assinatura só se verifica depois de
 //! desembrulhar a chave do cofre e ler as réplicas.
 //!
 //! Cada invólucro tem o seu próprio nonce. O seu AAD é o cabeçalho inteiro (com
-//! o id do cofre e a geração) seguido do tipo de método de desbloqueio, por isso
-//! um invólucro não pode ser trocado para outro cofre, reposto sob outra geração
-//! nem usado como invólucro de outro método.
+//! o id do cofre, a geração e quem escreveu os invólucros) seguido do tipo de
+//! método de desbloqueio, por isso um invólucro não pode ser trocado para outro
+//! cofre, reposto sob outra geração nem usado como invólucro de outro método.
+//! Quem assina não faz parte do AAD (ADR-0008): os invólucros, incluindo o da
+//! chave de recuperação (ticket 13), sobrevivem a uma troca de assinante.
 //!
 //! _Difere do ADR-0008_, que descreve o mesmo cabeçalho com nonce e corpo
 //! cifrado para a réplica e para o chaveiro. O chaveiro não pode ter o corpo
@@ -47,7 +57,9 @@ use crate::{KdfParams, VaultError};
 
 const MAGIC: [u8; 4] = *b"PWMK";
 const FORMAT_MAJOR: u16 = 1;
-const FORMAT_MINOR: u16 = 1;
+const FORMAT_MINOR: u16 = 2;
+/// A primeira versão secundária com o id de quem assina no fim do ficheiro.
+const FIRST_SIGNER_ID_MINOR: u16 = 2;
 const SIGNATURE_LABEL: &[u8] = b"pw-manager/signature/keyring";
 const HEADER_LEN: usize = 4 + 2 + 2 + ID_LEN + ID_LEN + 8;
 const SALT_LEN: usize = 16;
@@ -57,11 +69,18 @@ const MASTER_PASSWORD_AAD_LABEL: &[u8] = b"pw-manager/envelope/master-password";
 pub(crate) struct Keyring {
     header_bytes: [u8; HEADER_LEN],
     vault_id: VaultId,
-    writer: DeviceId,
+    minor: u16,
     generation: u64,
     body: KeyringBody,
     /// `None` num chaveiro 1.0, de antes das assinaturas.
-    signature: Option<[u8; SIGNATURE_LEN]>,
+    signature: Option<KeyringSignature>,
+}
+
+/// Quem assinou o chaveiro, e a assinatura.
+struct KeyringSignature {
+    /// Na versão 1.1 é sempre quem escreveu os invólucros.
+    signer: DeviceId,
+    signature: [u8; SIGNATURE_LEN],
 }
 
 #[derive(Serialize, Deserialize)]
@@ -110,7 +129,7 @@ impl From<&StoredKdfParams> for KdfParams {
 
 impl Keyring {
     /// Um chaveiro novo, com a chave do cofre embrulhada pela palavra-passe
-    /// mestra, assinado por `writer` com a sua chave `writer_key`.
+    /// mestra, escrito e assinado por `writer` com a sua chave `writer_key`.
     pub(crate) fn seal(
         vault_id: VaultId,
         writer: DeviceId,
@@ -141,8 +160,7 @@ impl Keyring {
             },
         };
         let body = cbor::encode(&body);
-        let signature = writer_key.sign(SIGNATURE_LABEL, &[&header_bytes, &body]);
-        Ok([header_bytes.as_slice(), &body, &signature].concat())
+        Ok(signed_bytes(&header_bytes, &body, writer, writer_key))
     }
 
     /// Lê um chaveiro. Um chaveiro de uma versão principal mais recente não é
@@ -167,10 +185,23 @@ impl Keyring {
             return Err(VaultError::KeyringRejected);
         }
         let (body, signature) = if minor >= FIRST_SIGNED_MINOR {
-            let (body, signature) = after_header
+            let (rest, signature) = after_header
                 .split_last_chunk::<SIGNATURE_LEN>()
                 .ok_or(VaultError::KeyringRejected)?;
-            (body, Some(*signature))
+            let (body, signer) = match minor >= FIRST_SIGNER_ID_MINOR {
+                true => {
+                    let (body, signer) = rest
+                        .split_last_chunk::<ID_LEN>()
+                        .ok_or(VaultError::KeyringRejected)?;
+                    (body, Id(*signer))
+                }
+                false => (rest, writer),
+            };
+            let signature = KeyringSignature {
+                signer,
+                signature: *signature,
+            };
+            (body, Some(signature))
         } else {
             (after_header, None)
         };
@@ -178,38 +209,77 @@ impl Keyring {
         Ok(Self {
             header_bytes: *header,
             vault_id,
-            writer,
+            minor,
             generation,
             body,
             signature,
         })
     }
 
-    /// Aceita o chaveiro se estiver assinado pelo dispositivo que o escreveu
-    /// com a chave pública que `public_key_of` dá a esse dispositivo: a da
-    /// lista de dispositivos conhecidos, ou `None` se não o conhece.
+    /// Aceita o chaveiro se a assinatura for válida pela chave pública que
+    /// `public_key_of` dá a quem o assinou: a da lista de dispositivos
+    /// conhecidos, ou `None` se não o conhece ou se está removido.
     ///
-    /// Um dispositivo removido continua a valer como autor: a remoção não
-    /// invalida o chaveiro que ele escreveu antes, e o chaveiro não diz quando
-    /// foi assinado. Uma geração nova escrita por um dispositivo removido é
-    /// assunto da alteração da palavra-passe mestra (ticket 14).
+    /// Quem remove o dispositivo que assinou o chaveiro volta a assiná-lo
+    /// ([`Keyring::resign`]); a partir daí, um chaveiro assinado pelo
+    /// removido, da mesma geração ou de uma nova, é rejeitado.
     pub(crate) fn verify(
         &self,
         public_key_of: impl Fn(DeviceId) -> Option<PublicKey>,
     ) -> Result<(), VaultError> {
-        let signature = self.signature.as_ref().ok_or(VaultError::KeyringRejected)?;
-        let public_key = public_key_of(self.writer).ok_or(VaultError::KeyringRejected)?;
+        let signed = self.signature.as_ref().ok_or(VaultError::KeyringRejected)?;
+        let public_key = public_key_of(signed.signer).ok_or(VaultError::KeyringRejected)?;
         let body = cbor::encode(&self.body);
-        let signed = [self.header_bytes.as_slice(), &body];
-        match device_key::verify(&public_key, SIGNATURE_LABEL, &signed, signature) {
+        let valid = match self.minor >= FIRST_SIGNER_ID_MINOR {
+            true => device_key::verify(
+                &public_key,
+                SIGNATURE_LABEL,
+                &[&self.header_bytes, &body, &signed.signer.0],
+                &signed.signature,
+            ),
+            false => device_key::verify(
+                &public_key,
+                SIGNATURE_LABEL,
+                &[&self.header_bytes, &body],
+                &signed.signature,
+            ),
+        };
+        match valid {
             true => Ok(()),
             false => Err(VaultError::KeyringRejected),
         }
     }
 
+    /// O mesmo chaveiro, com o cabeçalho e os invólucros byte a byte iguais,
+    /// assinado por `signer` com a sua chave `signer_key`. Só um chaveiro da
+    /// versão atual se pode assinar de novo: nos anteriores quem assina está no
+    /// cabeçalho, que é o AAD dos invólucros. Os anteriores são reescritos na
+    /// versão atual no desbloqueio ([`Keyring::is_current_version`]).
+    pub(crate) fn resign(
+        &self,
+        signer: DeviceId,
+        signer_key: &DeviceKey,
+    ) -> Result<Vec<u8>, VaultError> {
+        if !self.is_current_version() {
+            return Err(VaultError::KeyringRejected);
+        }
+        let body = cbor::encode(&self.body);
+        Ok(signed_bytes(&self.header_bytes, &body, signer, signer_key))
+    }
+
     /// É de uma versão com assinatura (1.1 ou mais recente), válida ou não.
     pub(crate) fn is_signed(&self) -> bool {
         self.signature.is_some()
+    }
+
+    /// É da versão do formato que esta app escreve.
+    pub(crate) fn is_current_version(&self) -> bool {
+        self.minor >= FORMAT_MINOR
+    }
+
+    /// Quem assinou o chaveiro, se está assinado.
+    pub(crate) fn signer(&self) -> Option<DeviceId> {
+        self.signature.as_ref().map(|signed| signed.signer)
     }
 
     pub(crate) fn vault_id(&self) -> VaultId {
@@ -220,24 +290,17 @@ impl Keyring {
         self.generation
     }
 
-    /// O dispositivo que escreveu o chaveiro, segundo o cabeçalho.
-    pub(crate) fn writer(&self) -> DeviceId {
-        self.writer
-    }
-
     /// O chaveiro escrito de novo a partir do que foi lido.
     #[cfg(feature = "fuzzing")]
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let signature = self
-            .signature
-            .as_ref()
-            .map_or(&[][..], |signature| signature);
-        [
-            self.header_bytes.as_slice(),
-            &cbor::encode(&self.body),
-            signature,
-        ]
-        .concat()
+        let mut bytes = [self.header_bytes.as_slice(), &cbor::encode(&self.body)].concat();
+        if let Some(signed) = &self.signature {
+            if self.minor >= FIRST_SIGNER_ID_MINOR {
+                bytes.extend_from_slice(&signed.signer.0);
+            }
+            bytes.extend_from_slice(&signed.signature);
+        }
+        bytes
     }
 
     /// Os parâmetros do Argon2id do invólucro da palavra-passe mestra, como
@@ -276,6 +339,17 @@ impl Keyring {
         key.copy_from_slice(&plaintext);
         Ok(key)
     }
+}
+
+/// O chaveiro da versão atual com `header` e `body`, assinado por `signer`.
+fn signed_bytes(
+    header: &[u8; HEADER_LEN],
+    body: &[u8],
+    signer: DeviceId,
+    signer_key: &DeviceKey,
+) -> Vec<u8> {
+    let signature = signer_key.sign(SIGNATURE_LABEL, &[header, body, &signer.0]);
+    [header.as_slice(), body, &signer.0, &signature].concat()
 }
 
 fn encode_header(

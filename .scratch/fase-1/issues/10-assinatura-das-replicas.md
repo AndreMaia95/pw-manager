@@ -32,5 +32,12 @@
 - Fuzzing curto local: `replica`, `keyring`, `merge` e `replica_body` (45 s cada), sem falhas.
 - Decisões a confirmar:
   - Exceção temporária até ao ticket 11: a réplica de um dispositivo ainda desconhecido entra se estiver assinada pela chave com que ela própria o regista. Enquanto durar, uma réplica dessas pode marcar dispositivos legítimos como removidos.
-  - Um chaveiro escrito por um dispositivo depois removido continua válido (a remoção não invalida o que ele assinou antes).
   - Num cofre 1.0 com vários dispositivos, só o primeiro a desbloquear migra; os outros juntam-se de novo. Só existem cofres 1.0 nos vetores.
+
+**Acrescento (2026-11-20), decisões do utilizador.** Confirmadas a exceção temporária até ao ticket 11 e a migração só do primeiro dispositivo num cofre 1.0. As sugestões opcionais da revisão de normas ficam para depois. Mudou:
+
+- Um chaveiro assinado por um dispositivo removido passa a ser rejeitado, da mesma geração ou de uma nova. Quando `remove_device` remove o dispositivo que assinou o chaveiro atual, este dispositivo volta a assiná-lo antes de escrever a remoção, com a mesma geração e os mesmos invólucros byte a byte.
+- Para isso o chaveiro passou a 1.2: o id de quem assina vai no fim do ficheiro, antes da assinatura, fora do cabeçalho e por isso fora do AAD dos invólucros. O AAD continua a ser o cabeçalho inteiro (id do cofre, quem escreveu os invólucros, geração) mais o tipo de método. Um chaveiro 1.0 ou 1.1 é reescrito em 1.2 no desbloqueio, com um invólucro novo da mesma palavra-passe. As réplicas ficam em 1.1.
+- No desbloqueio, o chaveiro é verificado antes de se comparar a geração, para uma geração nova escrita por um removido dar `KeyringRejected`.
+- O ADR-0008 regista que a 1.1 (e a 1.2) não cumprem a regra da versão secundária (uma app 1.0 não lê nem preserva um ficheiro 1.1), e porque ficam assim: nenhuma app 1.0 foi usada com dados reais. Regista também que quem assina não faz parte do AAD, para os invólucros, incluindo o da chave de recuperação, sobreviverem a uma troca de assinante.
+- Vetor novo `v1.2/with-removed-signer`. Testes novos em `tests/signatures.rs`: a reassinatura deixa o cabeçalho e os invólucros byte a byte iguais; remover quem não assinou não toca no chaveiro; chaveiro reassinado pelo removido, da mesma geração e de uma nova, rejeitado; chaveiro 1.1 reescrito em 1.2 no desbloqueio.

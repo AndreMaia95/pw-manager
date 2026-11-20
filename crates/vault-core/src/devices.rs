@@ -95,9 +95,13 @@ impl KnownDevice {
 /// Os dispositivos conhecidos, pelo id.
 pub(crate) type KnownDevices = BTreeMap<DeviceId, KnownDevice>;
 
-/// A chave pública registada do dispositivo `id` em `devices`, removido ou não.
-pub(crate) fn public_key(devices: &KnownDevices, id: DeviceId) -> Option<PublicKey> {
-    devices.get(&id).map(|device| device.public_key)
+/// A chave pública registada do dispositivo `id` em `devices`, se ele não
+/// estiver removido: a que pode assinar o chaveiro.
+pub(crate) fn signing_public_key(devices: &KnownDevices, id: DeviceId) -> Option<PublicKey> {
+    devices
+        .get(&id)
+        .filter(|device| !device.removed)
+        .map(|device| device.public_key)
 }
 
 /// Funde a lista `other` em `devices`.

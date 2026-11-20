@@ -1,8 +1,13 @@
 //! Gera um vetor de teste do formato com a versão atual (ADR-0016).
 //!
 //! ```text
-//! cargo run -p vault-core --example generate_format_vector -- <nome> [--with-unknown-fields | --with-trash-and-history | --with-generator-settings | --with-two-devices | --with-removed-device]
+//! cargo run -p vault-core --example generate_format_vector -- <nome> [--with-unknown-fields | --with-trash-and-history | --with-generator-settings | --with-two-devices | --with-removed-device | --with-removed-signer]
 //! ```
+//!
+//! Com `--with-removed-signer`, mais dois dispositivos juntam-se ao cofre; o
+//! segundo funde e remove o primeiro, que tinha escrito e assinado o
+//! chaveiro, e por isso volta a assiná-lo; o terceiro funde. O vetor descreve
+//! o segundo, e a pasta leva as três réplicas (ticket 10).
 //!
 //! Com `--with-removed-device`, mais dois dispositivos juntam-se ao cofre; o
 //! primeiro funde e remove o terceiro, e o segundo funde. A pasta do vetor
@@ -96,6 +101,7 @@ fn main() -> ExitCode {
     let with_generator_settings = flag("--with-generator-settings");
     let with_two_devices = flag("--with-two-devices");
     let with_removed_device = flag("--with-removed-device");
+    let with_removed_signer = flag("--with-removed-signer");
     let name = match args.as_slice() {
         [name] => name.clone(),
         [name, _]
@@ -103,13 +109,14 @@ fn main() -> ExitCode {
                 || with_trash_and_history
                 || with_generator_settings
                 || with_two_devices
-                || with_removed_device =>
+                || with_removed_device
+                || with_removed_signer =>
         {
             name.clone()
         }
         _ => {
             eprintln!(
-                "uso: generate_format_vector <nome> [--with-unknown-fields | --with-trash-and-history | --with-generator-settings | --with-two-devices | --with-removed-device], p. ex. single-device"
+                "uso: generate_format_vector <nome> [--with-unknown-fields | --with-trash-and-history | --with-generator-settings | --with-two-devices | --with-removed-device | --with-removed-signer], p. ex. single-device"
             );
             return ExitCode::FAILURE;
         }
@@ -117,7 +124,7 @@ fn main() -> ExitCode {
     // Devolve também as pastas locais de cada dispositivo, os ids das
     // entradas apagadas definitivamente e os dos dispositivos removidos.
     let write = |master_password: &str| {
-        let (folder, local, clock, vault) = write_vault(master_password);
+        let (folder, local, clock, mut vault) = write_vault(master_password);
         let mut locals = vec![(vault.device_id(), local.clone())];
         let mut deleted = Vec::new();
         let mut removed = Vec::new();
@@ -139,6 +146,12 @@ fn main() -> ExitCode {
             let (others, removed_id) = add_removed_device(&folder, &vault, master_password);
             locals.extend(others);
             removed.push(removed_id);
+        }
+        if with_removed_signer {
+            let (second, others, removed_id) = add_removed_signer(&folder, &vault, master_password);
+            locals.extend(others);
+            removed.push(removed_id);
+            vault = second;
         }
         (folder, locals, vault, deleted, removed)
     };
@@ -504,6 +517,41 @@ fn add_removed_device(
     )
 }
 
+/// Junta mais dois dispositivos ao cofre de `vault`, que escreveu e assinou o
+/// chaveiro. O segundo funde e remove o primeiro, e por isso volta a assinar o
+/// chaveiro; o terceiro funde, ficando a saber da remoção. Devolve o segundo,
+/// que o vetor descreve, o id e a pasta local de cada um dos dois, e o id do
+/// primeiro.
+fn add_removed_signer(
+    folder: &MemoryVaultFolder,
+    vault: &Vault,
+    master_password: &str,
+) -> (Vault, Vec<(String, MemoryLocalFolder)>, String) {
+    let join = || {
+        let local = MemoryLocalFolder::new();
+        let joined = Vault::join(
+            Arc::new(folder.clone()),
+            Arc::new(local.clone()),
+            Arc::new(ManualClock::new(CREATED_AT_MS)),
+            master_password,
+        )
+        .expect("juntar um dispositivo");
+        (joined, local)
+    };
+    let (second, second_local) = join();
+    let (third, third_local) = join();
+    second.merge().expect("fundir no segundo");
+    second
+        .remove_device(&vault.device_id())
+        .expect("remover o primeiro");
+    third.merge().expect("fundir no terceiro");
+    let locals = vec![
+        (second.device_id(), second_local),
+        (third.device_id(), third_local),
+    ];
+    (second, locals, vault.device_id())
+}
+
 /// Gera a palavra-passe da entrada "GitHub" com ajustes próprios (sem
 /// símbolos, 32 caracteres, com os ambíguos) e uma frase-passe de 6 palavras
 /// separadas por pontos para a outra. Ambas ficam com os ajustes guardados.
@@ -572,22 +620,24 @@ fn write_vault(
 }
 
 /// `v<principal>.<secundária>`, dos cabeçalhos do chaveiro e das réplicas
-/// (bytes 4 a 8, dois u16 BE). Se divergirem, a pasta do vetor tem de ser
-/// decidida à mão.
+/// (bytes 4 a 8, dois u16 BE). As versões secundárias do chaveiro e da réplica
+/// evoluem em separado: a pasta leva a mais alta. Se as versões principais
+/// divergirem, a pasta do vetor tem de ser decidida à mão.
 fn format_version(folder: &MemoryVaultFolder) -> Result<String, String> {
     let version = |bytes: &[u8]| {
         let major = u16::from_be_bytes([bytes[4], bytes[5]]);
         let minor = u16::from_be_bytes([bytes[6], bytes[7]]);
-        format!("v{major}.{minor}")
+        (major, minor)
     };
-    let keyring = version(&folder.keyring().expect("chaveiro"));
+    let (major, mut minor) = version(&folder.keyring().expect("chaveiro"));
     for device_id in folder.replica_device_ids() {
-        let replica = version(&folder.replica(&device_id).expect("réplica"));
-        if replica != keyring {
+        let (replica_major, replica_minor) = version(&folder.replica(&device_id).expect("réplica"));
+        if replica_major != major {
             return Err(format!(
-                "o chaveiro é {keyring} e a réplica é {replica}; escolhe a pasta à mão"
+                "o chaveiro é v{major} e a réplica é v{replica_major}; escolhe a pasta à mão"
             ));
         }
+        minor = minor.max(replica_minor);
     }
-    Ok(keyring)
+    Ok(format!("v{major}.{minor}"))
 }

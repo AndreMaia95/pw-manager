@@ -74,15 +74,22 @@ dados que os vetores existentes ainda não cobrem (entradas, histórico, lápide
    leva as duas réplicas, e `ExpectedState` descreve a do primeiro. Os ids
    das entradas que só ficam como lápide vão para `tombstones`.
 
+   Com `--with-removed-signer` no fim, mais dois dispositivos juntam-se; o
+   segundo remove o primeiro, que tinha assinado o chaveiro, e volta a
+   assiná-lo. O vetor descreve o segundo (o gerador imprime-o), e o id do
+   primeiro vai para `removed_devices`.
+
    Com `--with-removed-device` no fim, mais dois dispositivos juntam-se; o
    primeiro funde e remove o terceiro, e o segundo funde. A pasta do vetor
    leva as três réplicas e as três chaves; o id do removido vai para
    `removed_devices` em `ExpectedState`.
 
    O gerador lê a versão do formato dos bytes que escreveu e põe o vetor em
-   `v<principal>.<secundária>/<nome>/`. Recusa-se a escrever sobre uma pasta que
-   já existe, e desiste se o chaveiro e a réplica tiverem versões diferentes (nesse
-   caso decide a pasta e o nome à mão).
+   `v<principal>.<secundária>/<nome>/`, com a versão secundária mais alta entre
+   o chaveiro e as réplicas (evoluem em separado: desde a 1.2 do chaveiro, as
+   réplicas ficaram em 1.1). Recusa-se a escrever sobre uma pasta que já
+   existe, e desiste se as versões principais forem diferentes (nesse caso
+   decide a pasta e o nome à mão).
 3. Cola a entrada que o gerador imprime em `VECTORS`, em
    `tests/format_vectors.rs`. Se o estado novo ainda não estiver em
    `ExpectedState`, acrescenta lá o campo e compara-o no teste através da API
