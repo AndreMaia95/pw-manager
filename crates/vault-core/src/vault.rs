@@ -7,6 +7,7 @@ use crate::entry::{
     Entry, EntryChanges, EntryFields, EntryId, EntrySummary, HistoryVersion, PendingChanges,
     SecretField, VersionId,
 };
+use crate::generator::{self, GeneratorSettings};
 use crate::ids::{DeviceId, Id, VaultId};
 use crate::keyring::Keyring;
 use crate::replica::{self, ReplicaBody, ReplicaOwner};
@@ -178,6 +179,45 @@ impl Vault {
         // Apagadas da memória mesmo que a edição falhe.
         let changes = PendingChanges::from(changes);
         self.change_entry(entry_id, |entry, now_ms| entry.edit(changes, now_ms))
+    }
+
+    /// Gera uma palavra-passe para a entrada e grava-a como uma edição: a
+    /// anterior vai para o histórico. A gerada não é devolvida; só sai do
+    /// núcleo se for revelada (ADR-0005).
+    ///
+    /// Com `Some(settings)`, gera com esses ajustes e guarda-os na entrada;
+    /// com `None`, reutiliza os guardados nela, ou os de omissão.
+    pub fn generate_password(
+        &self,
+        entry_id: &str,
+        settings: Option<GeneratorSettings>,
+    ) -> Result<(), VaultError> {
+        if settings
+            .as_ref()
+            .is_some_and(|settings| !settings.is_valid())
+        {
+            return Err(VaultError::InvalidGeneratorSettings);
+        }
+        self.change_entry(entry_id, |entry, now_ms| {
+            let settings = match settings {
+                Some(settings) => {
+                    entry.set_generator_settings(settings.clone());
+                    settings
+                }
+                None => entry.generator_settings(),
+            };
+            let mut password = generator::generate(&settings)?;
+            let changes = EntryChanges {
+                password: Some(std::mem::take(&mut *password)),
+                ..EntryChanges::default()
+            };
+            entry.edit(changes.into(), now_ms)
+        })
+    }
+
+    /// Os ajustes do gerador guardados na entrada, ou os de omissão.
+    pub fn generator_settings(&self, entry_id: &str) -> Result<GeneratorSettings, VaultError> {
+        self.read_now(|body| Ok(entry(body, entry_id)?.generator_settings()))
     }
 
     /// Grava a versão `version_id` do histórico da entrada como uma edição

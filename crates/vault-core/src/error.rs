@@ -39,6 +39,11 @@ pub enum VaultError {
     /// é válido).
     #[error("versão não encontrada no histórico da entrada")]
     VersionNotFound,
+    /// Os ajustes do gerador não permitem gerar: nenhuma classe de
+    /// caracteres ativa, comprimento menor do que o número de classes ativas
+    /// ou fora de 1 a 128, ou número de palavras fora de 1 a 20.
+    #[error("ajustes do gerador inválidos")]
+    InvalidGeneratorSettings,
     #[error("id de dispositivo inválido")]
     InvalidDeviceId,
     #[error("o gerador de aleatoriedade do sistema falhou")]

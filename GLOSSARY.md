@@ -18,6 +18,9 @@ O código é escrito em inglês. A coluna **Em código** dá o identificador que
 | **Entrada exposta** | Uma entrada cujo segredo pode ter sido lido por terceiros e que ainda tem de ser alterado no próprio site. | `exposed` (estado de `Entry`) | entrada comprometida, entrada a alterar |
 | **Lixo** | Onde fica uma entrada apagada durante 30 dias, ainda recuperável, antes de se tornar lápide. | `EntryState::InTrash`, `list_trash` | reciclagem, apagadas |
 | **Lápide** | O que resta de uma entrada apagada definitivamente, ou que esteve 30 dias no Lixo: a prova de que foi apagada e quando, sem nenhum dos seus dados. | `Tombstone` | marca de apagada, tombstone |
+| **Gerador** | Gera uma palavra-passe ou uma frase-passe para uma entrada e grava-a nela, sem a devolver à app. | `generate_password` | gerador de senhas |
+| **Ajustes do gerador** | O que o gerador usa para uma entrada: comprimento e classes de caracteres (com ou sem caracteres ambíguos), ou o número de palavras da frase-passe. Ficam guardados na entrada e são reutilizados. | `GeneratorSettings` | configuração, opções, preferências |
+| **Frase-passe** | Uma palavra-passe feita de palavras da lista grande da EFF, separadas por espaços, fácil de escrever à mão. | `GeneratorSettings::Passphrase` | passphrase, frase secreta |
 
 ## Sincronização
 

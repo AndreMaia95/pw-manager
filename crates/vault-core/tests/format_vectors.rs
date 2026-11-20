@@ -12,7 +12,7 @@ use std::sync::Arc;
 use common::cbor::{bytes, text};
 use common::{from_hex, load_vector, vector_dirs, vectors_root};
 use vault_core::testing::{self, ManualClock, MemoryVaultFolder};
-use vault_core::{EntryChanges, EntryState, SecretField, Vault, VaultError};
+use vault_core::{EntryChanges, EntryState, GeneratorSettings, SecretField, Vault, VaultError};
 
 struct FormatVector {
     /// Pasta do vetor, relativa a `tests/vectors/`.
@@ -47,7 +47,20 @@ struct ExpectedEntry {
     state: EntryState,
     /// Da versão mais recente para a mais antiga.
     history: &'static [ExpectedVersion],
+    /// Os ajustes do gerador: os guardados, ou os de omissão.
+    generator: GeneratorSettings,
 }
+
+/// Os ajustes de omissão do gerador (ticket 08), para as entradas que nunca
+/// guardaram ajustes.
+const DEFAULT_GENERATOR: GeneratorSettings = GeneratorSettings::Password {
+    length: 20,
+    uppercase: true,
+    lowercase: true,
+    digits: true,
+    symbols: true,
+    exclude_ambiguous: true,
+};
 
 struct ExpectedVersion {
     title: &'static str,
@@ -91,6 +104,7 @@ const VECTORS: &[FormatVector] = &[
                     notes: "",
                     state: EntryState::Active,
                     history: &[],
+                    generator: DEFAULT_GENERATOR,
                 },
                 ExpectedEntry {
                     id: "12f71dfa8150d3af15d3c239ec4cb9a6",
@@ -101,6 +115,7 @@ const VECTORS: &[FormatVector] = &[
                     notes: "vetor: notas 1",
                     state: EntryState::Active,
                     history: &[],
+                    generator: DEFAULT_GENERATOR,
                 },
             ],
             unknown_fields: &[],
@@ -124,6 +139,7 @@ const VECTORS: &[FormatVector] = &[
                     notes: "",
                     state: EntryState::Active,
                     history: &[],
+                    generator: DEFAULT_GENERATOR,
                 },
                 ExpectedEntry {
                     id: "35f645c228d4e9497d42139284f7df7d",
@@ -134,6 +150,7 @@ const VECTORS: &[FormatVector] = &[
                     notes: "vetor: notas 1",
                     state: EntryState::Active,
                     history: &[],
+                    generator: DEFAULT_GENERATOR,
                 },
             ],
             unknown_fields: &[
@@ -160,6 +177,7 @@ const VECTORS: &[FormatVector] = &[
                     notes: "",
                     state: EntryState::Active,
                     history: &[],
+                    generator: DEFAULT_GENERATOR,
                 },
                 ExpectedEntry {
                     id: "41c6671cded4a02c697ec5a917b793fd",
@@ -177,6 +195,7 @@ const VECTORS: &[FormatVector] = &[
                         notes: "vetor: notas 1",
                         replaced_at_ms: 1_767_312_000_000,
                     }],
+                    generator: DEFAULT_GENERATOR,
                 },
                 ExpectedEntry {
                     id: "ad72da3defae3cc588e061fbc28963db",
@@ -189,10 +208,67 @@ const VECTORS: &[FormatVector] = &[
                         trashed_at_ms: 1_767_398_400_000,
                     },
                     history: &[],
+                    generator: DEFAULT_GENERATOR,
                 },
             ],
             unknown_fields: &[],
             tombstones: &["c26f08d1eeb73e96d8c9bcc34f51156f"],
+        },
+    },
+    FormatVector {
+        path: "v1.0/with-generator-settings",
+        master_password: "vetor de teste v1.0",
+        expected: ExpectedState {
+            vault_id: "2f70ea829ea66910e6ecfb79b5ff36f2",
+            device_id: "908e62825d6446301a656075093b44a5",
+            created_at_ms: 1_767_225_600_000,
+            entries: &[
+                ExpectedEntry {
+                    id: "452ba4b1ff0a775c0a804f27139db879",
+                    title: "exemplo.pt",
+                    url: "https://www.exemplo.pt/entrar",
+                    username: "utilizador@exemplo.pt",
+                    password: "muster penalize renewably jazz mothball ecosystem",
+                    notes: "",
+                    state: EntryState::Active,
+                    history: &[ExpectedVersion {
+                        title: "exemplo.pt",
+                        url: "https://www.exemplo.pt/entrar",
+                        username: "utilizador@exemplo.pt",
+                        password: "vetor: palavra-passe 2",
+                        notes: "",
+                        replaced_at_ms: 1_767_225_600_000,
+                    }],
+                    generator: GeneratorSettings::Passphrase { word_count: 6 },
+                },
+                ExpectedEntry {
+                    id: "a5221ffbabc9cad74870293ce186dce1",
+                    title: "GitHub",
+                    url: "https://github.com/login",
+                    username: "andre",
+                    password: "fvRe0uzDBi1C0TWlIwvfVXRmfRFvlR97",
+                    notes: "vetor: notas 1",
+                    state: EntryState::Active,
+                    history: &[ExpectedVersion {
+                        title: "GitHub",
+                        url: "https://github.com/login",
+                        username: "andre",
+                        password: "vetor: palavra-passe 1",
+                        notes: "vetor: notas 1",
+                        replaced_at_ms: 1_767_225_600_000,
+                    }],
+                    generator: GeneratorSettings::Password {
+                        length: 32,
+                        uppercase: true,
+                        lowercase: true,
+                        digits: true,
+                        symbols: false,
+                        exclude_ambiguous: false,
+                    },
+                },
+            ],
+            unknown_fields: &[],
+            tombstones: &[],
         },
     },
 ];
@@ -312,6 +388,11 @@ fn assert_entries(vault: &Vault, expected: &[ExpectedEntry], path: &str) {
             "{path}: notas de {id}"
         );
         assert_history(vault, id, expected.history, path);
+        assert_eq!(
+            vault.generator_settings(id).as_ref(),
+            Ok(&expected.generator),
+            "{path}: ajustes do gerador de {id}"
+        );
     }
 }
 

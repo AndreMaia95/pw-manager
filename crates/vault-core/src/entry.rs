@@ -11,6 +11,7 @@ use zeroize::Zeroizing;
 
 use crate::VaultError;
 use crate::cbor::{self, MapReader, MapWriter, UnknownFields};
+use crate::generator::{GeneratorSettings, StoredSettings};
 use crate::ids::{ID_LEN, Id};
 
 pub(crate) type EntryId = Id;
@@ -259,6 +260,8 @@ pub(crate) struct Entry {
     history: Vec<Version>,
     /// Quando foi para o Lixo, se lá está.
     trashed_at_ms: Option<i64>,
+    /// Os ajustes do gerador, se alguma vez foram dados para esta entrada.
+    generator: Option<StoredSettings>,
     /// Campos escritos por uma versão mais nova, preservados (ADR-0008).
     unknown: UnknownFields,
 }
@@ -287,6 +290,7 @@ impl Entry {
             fields,
             history: Vec::new(),
             trashed_at_ms: None,
+            generator: None,
             unknown: UnknownFields::default(),
         }
     }
@@ -358,6 +362,21 @@ impl Entry {
         Ok(())
     }
 
+    /// Os ajustes do gerador desta entrada, ou os de omissão.
+    pub(crate) fn generator_settings(&self) -> GeneratorSettings {
+        self.generator
+            .as_ref()
+            .map(StoredSettings::settings)
+            .unwrap_or_default()
+    }
+
+    /// Guarda `settings` como os ajustes do gerador desta entrada. Substitui
+    /// os anteriores por inteiro, incluindo campos desconhecidos deles: esses
+    /// diziam respeito aos ajustes antigos.
+    pub(crate) fn set_generator_settings(&mut self, settings: GeneratorSettings) {
+        self.generator = Some(StoredSettings::new(settings));
+    }
+
     pub(crate) fn summary(&self) -> EntrySummary {
         EntrySummary {
             id: self.id.to_string(),
@@ -392,8 +411,9 @@ impl Entry {
 
     /// O mapa da entrada. Não existia no primeiro vetor da versão 1.0, por isso
     /// não tem campos de origem: todos seguem a ordem da chave codificada
-    /// (ADR-0008). O histórico só é escrito quando não está vazio, e a data do
-    /// Lixo só quando a entrada lá está.
+    /// (ADR-0008). O histórico só é escrito quando não está vazio, a data do
+    /// Lixo só quando a entrada lá está, e os ajustes do gerador só depois de
+    /// dados.
     pub(crate) fn encode(&self) -> Zeroizing<Vec<u8>> {
         let mut map = MapWriter::new();
         map.added("id", serde_bytes::Bytes::new(&self.id.0));
@@ -401,6 +421,9 @@ impl Entry {
         if !self.history.is_empty() {
             let versions = self.history.iter().map(Version::encode).collect();
             map.added_item("history", cbor::encode_array(versions));
+        }
+        if let Some(generator) = &self.generator {
+            map.added_item("generator", generator.encode());
         }
         if let Some(trashed_at_ms) = &self.trashed_at_ms {
             map.added("trashed_at_ms", trashed_at_ms);
@@ -429,11 +452,16 @@ impl Entry {
             Some(item) => Some(cbor::decode_value(item)?),
             None => None,
         };
+        let generator = match map.take("generator") {
+            Some(item) => Some(StoredSettings::decode(item)?),
+            None => None,
+        };
         Some(Self {
             id,
             fields,
             history,
             trashed_at_ms,
+            generator,
             unknown: map.into_unknown(),
         })
     }

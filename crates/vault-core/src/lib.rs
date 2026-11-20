@@ -12,6 +12,7 @@ mod error;
 mod format_version;
 #[cfg(feature = "fuzzing")]
 pub mod fuzzing;
+mod generator;
 mod ids;
 mod kdf;
 mod keyring;
@@ -26,6 +27,7 @@ mod vault;
 pub use clock::{Clock, SystemClock};
 pub use entry::{EntryChanges, EntryFields, EntryState, EntrySummary, HistoryVersion, SecretField};
 pub use error::{StorageError, VaultError};
+pub use generator::GeneratorSettings;
 pub use kdf::KdfParams;
 pub use storage::Storage;
 pub use vault::Vault;

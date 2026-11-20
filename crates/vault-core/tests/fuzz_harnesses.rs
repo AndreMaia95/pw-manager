@@ -69,6 +69,40 @@ fn replica_body_with_trash_and_history_seed() -> Vec<u8> {
     ])
 }
 
+/// Um corpo com duas entradas com ajustes do gerador: uma palavra-passe com um
+/// campo desconhecido e uma frase-passe, pela ordem canónica (ADR-0008).
+fn replica_body_with_generator_settings_seed() -> Vec<u8> {
+    let entry = |id: u8, generator: Vec<u8>| {
+        map(&[
+            ("id", bytes(&[id; 16])),
+            ("url", text("https://a.pt")),
+            ("notes", text("n")),
+            ("title", text("a.pt")),
+            ("password", text("p")),
+            ("username", text("u")),
+            ("generator", generator),
+        ])
+    };
+    let password = map(&[
+        ("kind", text("password")),
+        ("digits", b"\xf5".to_vec()),
+        ("length", uint(6)),
+        ("symbols", b"\xf4".to_vec()),
+        ("lowercase", b"\xf4".to_vec()),
+        ("uppercase", b"\xf4".to_vec()),
+        ("min_digits", uint(2)),
+        ("exclude_ambiguous", b"\xf4".to_vec()),
+    ]);
+    let passphrase = map(&[("kind", text("passphrase")), ("word_count", uint(6))]);
+    map(&[
+        ("created_at_ms", uint(0)),
+        (
+            "entries",
+            array(&[entry(0x11, password), entry(0x22, passphrase)]),
+        ),
+    ])
+}
+
 #[test]
 fn the_keyring_reader_survives_every_vector_and_its_mutations() {
     for keyring in vector_files("keyring") {
@@ -96,6 +130,16 @@ fn the_replica_body_decoder_survives_a_body_with_entries_and_its_mutations() {
 #[test]
 fn the_replica_body_decoder_survives_a_body_with_trash_and_history_and_its_mutations() {
     let seed = replica_body_with_trash_and_history_seed();
+    assert!(
+        fuzzing::replica_body_is_accepted(&seed),
+        "a semente é válida"
+    );
+    for_each_mutation(&seed, fuzzing::replica_body);
+}
+
+#[test]
+fn the_replica_body_decoder_survives_a_body_with_generator_settings_and_its_mutations() {
+    let seed = replica_body_with_generator_settings_seed();
     assert!(
         fuzzing::replica_body_is_accepted(&seed),
         "a semente é válida"

@@ -54,6 +54,10 @@ dados que os vetores existentes ainda não cobrem (entradas, histórico, lápide
    versão no histórico da entrada "GitHub", uma entrada no Lixo e uma lápide.
    O id da lápide vai para `tombstones` em `ExpectedState`.
 
+   Com `--with-generator-settings` no fim, a entrada "GitHub" leva uma
+   palavra-passe gerada com ajustes próprios e a outra uma frase-passe, ambas
+   com os ajustes do gerador guardados.
+
    O gerador lê a versão do formato dos bytes que escreveu e põe o vetor em
    `v<principal>.<secundária>/<nome>/`. Recusa-se a escrever sobre uma pasta que
    já existe, e desiste se o chaveiro e a réplica tiverem versões diferentes (nesse

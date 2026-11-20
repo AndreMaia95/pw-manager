@@ -1,8 +1,11 @@
 //! Gera um vetor de teste do formato com a versão atual (ADR-0016).
 //!
 //! ```text
-//! cargo run -p vault-core --example generate_format_vector -- <nome> [--with-unknown-fields | --with-trash-and-history]
+//! cargo run -p vault-core --example generate_format_vector -- <nome> [--with-unknown-fields | --with-trash-and-history | --with-generator-settings]
 //! ```
+//!
+//! Com `--with-generator-settings`, a entrada "GitHub" leva uma palavra-passe
+//! gerada com ajustes próprios e a outra uma frase-passe (ticket 08).
 //!
 //! Com `--with-trash-and-history`, o cofre do vetor leva também uma versão no
 //! histórico da entrada "GitHub", uma entrada no Lixo e uma lápide (ticket 07).
@@ -24,7 +27,9 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use vault_core::testing::{self, ManualClock, MemoryVaultFolder};
-use vault_core::{EntryChanges, EntryFields, EntryState, KdfParams, SecretField, Vault};
+use vault_core::{
+    EntryChanges, EntryFields, EntryState, GeneratorSettings, KdfParams, SecretField, Vault,
+};
 
 #[path = "../tests/common/cbor.rs"]
 mod cbor;
@@ -75,12 +80,15 @@ fn main() -> ExitCode {
     let flag = |wanted: &str| args.get(1).is_some_and(|flag| flag == wanted);
     let with_unknown_fields = flag("--with-unknown-fields");
     let with_trash_and_history = flag("--with-trash-and-history");
+    let with_generator_settings = flag("--with-generator-settings");
     let name = match args.as_slice() {
         [name] => name.clone(),
-        [name, _] if with_unknown_fields || with_trash_and_history => name.clone(),
+        [name, _] if with_unknown_fields || with_trash_and_history || with_generator_settings => {
+            name.clone()
+        }
         _ => {
             eprintln!(
-                "uso: generate_format_vector <nome> [--with-unknown-fields | --with-trash-and-history], p. ex. single-device"
+                "uso: generate_format_vector <nome> [--with-unknown-fields | --with-trash-and-history | --with-generator-settings], p. ex. single-device"
             );
             return ExitCode::FAILURE;
         }
@@ -92,6 +100,9 @@ fn main() -> ExitCode {
         }
         if with_trash_and_history {
             add_trash_and_history(&clock, &vault);
+        }
+        if with_generator_settings {
+            add_generator_settings(&vault);
         }
         (folder, vault)
     };
@@ -177,6 +188,7 @@ fn main() -> ExitCode {
                 notes: {:?},
                 state: {state},
                 history: &[{history}],
+                generator: GeneratorSettings::{generator:?},
             }},"#,
             entry.id,
             entry.title,
@@ -184,6 +196,9 @@ fn main() -> ExitCode {
             entry.username,
             reveal(SecretField::Password),
             reveal(SecretField::Notes),
+            generator = vault
+                .generator_settings(&entry.id)
+                .expect("ler os ajustes do gerador"),
         );
     }
     println!(
@@ -312,6 +327,28 @@ fn add_trash_and_history(clock: &ManualClock, vault: &Vault) {
     vault
         .delete_entry_permanently(&deleted)
         .expect("apagar definitivamente");
+}
+
+/// Gera a palavra-passe da entrada "GitHub" com ajustes próprios (sem
+/// símbolos, 32 caracteres, com os ambíguos) e uma frase-passe de 6 palavras
+/// para a outra. Ambas ficam com os ajustes guardados.
+fn add_generator_settings(vault: &Vault) {
+    for entry in vault.list_entries().expect("listar as entradas") {
+        let settings = match entry.title.as_str() {
+            "GitHub" => GeneratorSettings::Password {
+                length: 32,
+                uppercase: true,
+                lowercase: true,
+                digits: true,
+                symbols: false,
+                exclude_ambiguous: false,
+            },
+            _ => GeneratorSettings::Passphrase { word_count: 6 },
+        };
+        vault
+            .generate_password(&entry.id, Some(settings))
+            .expect("gerar");
+    }
 }
 
 /// O id da única lápide do corpo da réplica: os 16 bytes a seguir à chave
