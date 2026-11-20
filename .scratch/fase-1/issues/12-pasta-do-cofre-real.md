@@ -16,3 +16,6 @@
 ## Comments
 
 **Nota do ticket 07 (2026-11-20).** A `MemoryVaultFolder` já simula uma pasta que se lê mas não aceita escritas (`set_writable(false)`), além da pasta indisponível (`set_available(false)`). Serve para os testes deste ticket.
+
+**Nota do ticket 09 (2026-11-20).** `Storage` ganhou `list_replicas()` (os ids dos dispositivos com réplica na pasta), e o núcleo já ignora nomes que não sejam um id de dispositivo, como `cofre (1).vault`. Falta a indicação de descarregada ou não. A fusão é `Vault::merge()`. O desbloqueio continua a ler só a réplica deste dispositivo.
+

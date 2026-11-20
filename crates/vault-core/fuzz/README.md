@@ -10,6 +10,7 @@ pânico ou aceitar o que não devia. As verificações estão em `src/fuzzing.rs
 | `keyring` | um chaveiro | o cabeçalho aceite é de um chaveiro 1.x e o id do cofre e a geração lidos são os do cabeçalho; não aceita bytes depois do corpo CBOR; o invólucro nunca abre com uma palavra-passe que não o selou |
 | `replica` | uma réplica | sem a chave do cofre nada é aceite; autenticada com a chave do cofre, só é aceite com o cabeçalho do dono (cofre, dispositivo, geração, versão) |
 | `replica_body` | o corpo decifrado de uma réplica, em CBOR | o que aceita volta a ler-se igual depois de escrito; não aceita bytes a mais |
+| `merge` | dois corpos decifrados (o comprimento do primeiro em u16 BE, o primeiro e o segundo) | a fusão de dois corpos aceites não entra em pânico, dá o mesmo pelas duas ordens, dá um corpo que o leitor aceita, e fundi-lo consigo mesmo não o muda |
 
 ## Correr localmente
 
@@ -26,6 +27,7 @@ Uma execução curta de cada alvo, a partir de `crates/vault-core/`:
 cargo +nightly fuzz run keyring -- -max_total_time=60
 cargo +nightly fuzz run replica -- -max_total_time=60
 cargo +nightly fuzz run replica_body -- -max_total_time=60
+cargo +nightly fuzz run merge -- -max_total_time=60
 ```
 
 `cargo +nightly fuzz list` mostra os alvos. O corpus cresce em `fuzz/corpus/<alvo>/`
@@ -35,6 +37,15 @@ antes de correr, p. ex.:
 ```sh
 mkdir -p fuzz/corpus/keyring
 cp tests/vectors/v1.0/single-device/keyring fuzz/corpus/keyring/v1.0-single-device
+```
+
+O alvo `merge` precisa de dois corpos válidos para chegar à fusão. A semente em
+`fuzz/seeds/merge/` é a de `replica_bodies_to_merge_seed` em
+`tests/fuzz_harnesses.rs` (um teste confirma que são iguais):
+
+```sh
+mkdir -p fuzz/corpus/merge
+cp fuzz/seeds/merge/* fuzz/corpus/merge/
 ```
 
 ## Quando encontra um problema

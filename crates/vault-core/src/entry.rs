@@ -13,6 +13,7 @@ use crate::VaultError;
 use crate::cbor::{self, MapReader, MapWriter, UnknownFields};
 use crate::generator::{GeneratorSettings, StoredSettings};
 use crate::ids::{ID_LEN, Id};
+use crate::stamp::Stamp;
 
 pub(crate) type EntryId = Id;
 
@@ -107,12 +108,15 @@ pub struct EntrySummary {
 /// um pedido explícito de revelar (ADR-0005).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryVersion {
+    /// O mesmo em todos os dispositivos: o carimbo da alteração que escreveu
+    /// a versão (ou, numa versão anterior aos carimbos, um id aleatório).
     pub id: String,
     pub title: String,
     pub url: String,
     pub username: String,
     /// Quando deixou de ser a versão atual, em milissegundos desde
-    /// 1970-01-01T00:00:00Z.
+    /// 1970-01-01T00:00:00Z. Uma versão perdida numa fusão tem a data em que
+    /// foi escrita.
     pub replaced_at_ms: i64,
 }
 
@@ -207,15 +211,56 @@ impl Drop for Fields {
 struct Version {
     id: VersionId,
     fields: Fields,
-    /// Quando deixou de ser a versão atual.
+    /// Quando deixou de ser a versão atual. Uma versão perdida numa fusão
+    /// nunca foi substituída neste dispositivo: fica com a data do seu próprio
+    /// carimbo, para que todos os dispositivos lhe deem a mesma.
     replaced_at_ms: i64,
     /// Campos escritos por uma versão mais nova, preservados (ADR-0008).
     unknown: UnknownFields,
 }
 
-pub(crate) type VersionId = Id;
+/// O que identifica uma versão da entrada, seja qual for a réplica de onde
+/// vem: o carimbo da alteração que a escreveu. As versões escritas antes de
+/// haver carimbos têm um id aleatório.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum VersionId {
+    BeforeStamps(Id),
+    Stamped(Stamp),
+}
+
+impl VersionId {
+    /// O id de uma versão como o mostra [`HistoryVersion`].
+    pub(crate) fn parse(text: &str) -> Option<Self> {
+        Id::from_hex(text)
+            .map(Self::BeforeStamps)
+            .or_else(|| Stamp::from_hex(text).map(Self::Stamped))
+    }
+
+    fn stamp(self) -> Stamp {
+        match self {
+            Self::BeforeStamps(_) => Stamp::BEFORE_STAMPS,
+            Self::Stamped(stamp) => stamp,
+        }
+    }
+}
+
+impl fmt::Display for VersionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BeforeStamps(id) => id.fmt(f),
+            Self::Stamped(stamp) => stamp.fmt(f),
+        }
+    }
+}
 
 impl Version {
+    /// A ordem do histórico, da versão mais recente para a mais antiga: pelo
+    /// carimbo e, entre as versões anteriores aos carimbos, pela data em que
+    /// foram substituídas.
+    fn order(&self) -> (Stamp, i64, VersionId) {
+        (self.id.stamp(), self.replaced_at_ms, self.id)
+    }
+
     fn summary(&self) -> HistoryVersion {
         HistoryVersion {
             id: self.id.to_string(),
@@ -228,9 +273,13 @@ impl Version {
 
     /// O mapa de uma versão. Nasceu depois do primeiro vetor da versão 1.0:
     /// todos os campos seguem a ordem da chave codificada (ADR-0008).
+    /// Uma versão anterior aos carimbos tem `id`; as outras têm `stamp`.
     fn encode(&self) -> Zeroizing<Vec<u8>> {
         let mut map = MapWriter::new();
-        map.added("id", serde_bytes::Bytes::new(&self.id.0));
+        match self.id {
+            VersionId::BeforeStamps(id) => map.added("id", serde_bytes::Bytes::new(&id.0)),
+            VersionId::Stamped(stamp) => map.added_item("stamp", stamp.encode()),
+        }
         self.fields.encode_into(&mut map);
         map.added("replaced_at_ms", &self.replaced_at_ms);
         map.unknown(&self.unknown);
@@ -239,7 +288,11 @@ impl Version {
 
     fn decode(bytes: &[u8]) -> Option<Self> {
         let mut map = MapReader::parse(bytes)?;
-        let id = Id::decode_cbor(map.take("id")?)?;
+        let id = match (map.take("id"), map.take("stamp")) {
+            (Some(id), None) => VersionId::BeforeStamps(Id::decode_cbor(id)?),
+            (None, Some(stamp)) => VersionId::Stamped(Stamp::decode(stamp)?),
+            _ => return None,
+        };
         let fields = Fields::decode_from(&mut map)?;
         let replaced_at_ms = cbor::decode_value(map.take("replaced_at_ms")?)?;
         Some(Self {
@@ -255,6 +308,8 @@ impl Version {
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Entry {
     pub(crate) id: EntryId,
+    /// O carimbo da última alteração da entrada (ADR-0003).
+    pub(crate) stamp: Stamp,
     fields: Fields,
     /// As versões anteriores, da mais recente para a mais antiga.
     history: Vec<Version>,
@@ -267,8 +322,8 @@ pub(crate) struct Entry {
 }
 
 impl Entry {
-    /// Uma entrada nova com `fields`. O id fica a zeros até quem a cria lhe dar
-    /// um.
+    /// Uma entrada nova com `fields`. O id fica a zeros e o carimbo anterior
+    /// a todos até quem a cria lhes dar valores.
     pub(crate) fn new(fields: EntryFields) -> Self {
         let EntryFields {
             title,
@@ -287,6 +342,7 @@ impl Entry {
         fill_empty_title(&mut fields);
         Self {
             id: Id([0; ID_LEN]),
+            stamp: Stamp::BEFORE_STAMPS,
             fields,
             history: Vec::new(),
             trashed_at_ms: None,
@@ -343,7 +399,7 @@ impl Entry {
 
     /// Torna `fields` a versão atual. Se for diferente da anterior, esta vai
     /// para o histórico, marcada com `now_ms`; o histórico guarda as últimas
-    /// [`HISTORY_LEN`].
+    /// [`HISTORY_LEN`]. O carimbo da entrada é mudado por quem a altera.
     fn set_fields(&mut self, fields: Fields, now_ms: i64) -> Result<(), VaultError> {
         if self.is_in_trash() {
             return Err(VaultError::EntryInTrash);
@@ -352,14 +408,101 @@ impl Entry {
             return Ok(());
         }
         let previous = Version {
-            id: Id::random()?,
+            id: self.version_id(),
             fields: std::mem::replace(&mut self.fields, fields),
             replaced_at_ms: now_ms,
             unknown: UnknownFields::default(),
         };
-        self.history.insert(0, previous);
-        self.history.truncate(HISTORY_LEN);
+        self.add_to_history([previous]);
         Ok(())
+    }
+
+    /// O id que a versão atual leva quando passa para o histórico. Uma entrada
+    /// anterior aos carimbos só tem uma versão sem carimbo, por isso usa o id
+    /// da entrada: assim todos os dispositivos lhe dão o mesmo.
+    fn version_id(&self) -> VersionId {
+        match self.stamp.is_before_stamps() {
+            true => VersionId::BeforeStamps(self.id),
+            false => VersionId::Stamped(self.stamp),
+        }
+    }
+
+    /// Acrescenta `versions` ao histórico. Uma versão que já lá está fica com a
+    /// cópia que substituiu mais tarde (e, num empate, com a de maior
+    /// codificação), para que a escolha seja a mesma em todos os dispositivos.
+    /// Fica ordenado da mais recente para a mais antiga e com as últimas
+    /// [`HISTORY_LEN`].
+    fn add_to_history(&mut self, versions: impl IntoIterator<Item = Version>) {
+        for version in versions {
+            match self.history.iter_mut().find(|other| other.id == version.id) {
+                Some(other) => {
+                    let (a, b) = (version.encode(), other.encode());
+                    if (version.replaced_at_ms, a.as_slice()) > (other.replaced_at_ms, b.as_slice())
+                    {
+                        *other = version;
+                    }
+                }
+                None => self.history.push(version),
+            }
+        }
+        self.history
+            .sort_by_key(|version| std::cmp::Reverse(version.order()));
+        self.history.truncate(HISTORY_LEN);
+    }
+
+    /// Funde duas cópias da mesma entrada (ADR-0003). Fica a versão com o
+    /// carimbo mais alto; a outra vai para o histórico, com a data do seu
+    /// carimbo, e os históricos juntam-se. Duas versões com o mesmo carimbo são
+    /// a mesma alteração: fica uma, a de maior codificação, para que a escolha
+    /// não dependa da ordem.
+    pub(crate) fn merge(self, other: Entry) -> Entry {
+        if self == other {
+            return self;
+        }
+        let (a, b) = (self.encode(), other.encode());
+        let (mut winner, loser) = match (self.stamp, a.as_slice()) >= (other.stamp, b.as_slice()) {
+            true => (self, other),
+            false => (other, self),
+        };
+        let id = loser.version_id();
+        let Entry {
+            stamp,
+            fields,
+            history,
+            ..
+        } = loser;
+        // Os campos desconhecidos da entrada perdedora não vão com ela: são
+        // campos da entrada, e o histórico só guarda os cinco campos (ticket
+        // 07).
+        let lost = (stamp != winner.stamp).then(|| Version {
+            id,
+            fields,
+            replaced_at_ms: stamp.ms(),
+            unknown: UnknownFields::default(),
+        });
+        winner.add_to_history(history.into_iter().chain(lost));
+        winner
+    }
+
+    /// O que resta da entrada depois de uma lápide com o carimbo `deleted`:
+    /// sai do histórico o que tem carimbo até esse, porque foi apagado.
+    /// `None` se a própria versão atual também foi apagada.
+    pub(crate) fn remains_after(mut self, deleted: Stamp) -> Option<Entry> {
+        if self.stamp <= deleted {
+            return None;
+        }
+        self.history.retain(|version| version.id.stamp() > deleted);
+        Some(self)
+    }
+
+    /// A entrada e todo o seu histórico são posteriores a `deleted`: uma
+    /// lápide com esse carimbo não lhe apaga nada.
+    pub(crate) fn is_all_after(&self, deleted: Stamp) -> bool {
+        self.stamp > deleted
+            && self
+                .history
+                .iter()
+                .all(|version| version.id.stamp() > deleted)
     }
 
     /// Os ajustes do gerador desta entrada, ou os de omissão.
@@ -428,21 +571,30 @@ impl Entry {
         if let Some(trashed_at_ms) = &self.trashed_at_ms {
             map.added("trashed_at_ms", trashed_at_ms);
         }
+        self.stamp.encode_into(&mut map);
         map.unknown(&self.unknown);
         map.finish()
     }
 
     /// Lê o mapa de uma entrada. A codificação canónica é verificada por quem
-    /// lê o corpo inteiro.
+    /// lê o corpo inteiro; aqui verifica-se o que ela não apanha: o histórico
+    /// tem de estar por ordem, sem versões repetidas, e todas anteriores à
+    /// versão atual.
     pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
         let mut map = MapReader::parse(bytes)?;
         let id = Id::decode_cbor(map.take("id")?)?;
+        let stamp = Stamp::decode_from(&mut map)?;
         let fields = Fields::decode_from(&mut map)?;
         let mut history: Vec<Version> = Vec::new();
         if let Some(items) = map.take("history") {
             for item in cbor::split_array(items)? {
                 let version = Version::decode(item)?;
-                if history.iter().any(|other| other.id == version.id) {
+                let older = version.id.stamp() < stamp
+                    || (version.id.stamp().is_before_stamps() && stamp.is_before_stamps());
+                let in_order = history
+                    .last()
+                    .is_none_or(|previous| previous.order() > version.order());
+                if !older || !in_order || history.iter().any(|other| other.id == version.id) {
                     return None;
                 }
                 history.push(version);
@@ -458,6 +610,7 @@ impl Entry {
         };
         Some(Self {
             id,
+            stamp,
             fields,
             history,
             trashed_at_ms,

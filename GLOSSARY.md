@@ -32,7 +32,9 @@ O código é escrito em inglês. A coluna **Em código** dá o identificador que
 | **Réplica** | A cópia do cofre escrita por um único dispositivo; nenhum outro dispositivo escreve nela. | `Replica` | ficheiro do dispositivo, cópia |
 | **Chaveiro** | O ficheiro partilhado na pasta do cofre com os invólucros da palavra-passe mestra e da chave de recuperação. | `Keyring` | keyring, ficheiro de chaves |
 | **Pasta do cofre** | O local partilhado (hoje no iCloud Drive) onde estão as réplicas de todos os dispositivos. | `VaultFolder` (acedida pela interface `Storage`) | pasta de sincronização |
-| **Fusão** | Combinar as réplicas de todos os dispositivos num único estado do cofre, entrada a entrada; a alteração mais recente ganha. | `merge` | merge, sincronização, resolução de conflitos |
+| **Fusão** | Combinar as réplicas de todos os dispositivos num único estado do cofre, entrada a entrada; a alteração mais recente ganha. | `merge`; `Vault::merge` devolve um `MergeReport` | merge, sincronização, resolução de conflitos |
+| **Carimbo** | A marca de cada versão de uma entrada e de cada lápide, de um relógio lógico híbrido: data, contador e id do dispositivo. Decide o que ganha na fusão e nunca recua. | `Stamp` | timestamp, data de alteração, versão |
+| **Juntar-se ao cofre** | Um dispositivo entra pela primeira vez num cofre que já existe, escolhendo a pasta do cofre e escrevendo a palavra-passe mestra: funde as réplicas que lá estão e escreve a sua. | `Vault::join` | registar, adicionar dispositivo |
 | **Cópia de segurança** | Uma cópia cifrada e datada do cofre, guardada fora da pasta do cofre. | `Backup` | backup, snapshot, versão |
 
 ## Acesso

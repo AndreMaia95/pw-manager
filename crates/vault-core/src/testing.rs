@@ -60,6 +60,12 @@ impl MemoryVaultFolder {
         self.files().replicas.insert(device_id.to_owned(), bytes);
     }
 
+    /// Apaga a réplica de `device_id` da pasta, como se o ficheiro fosse
+    /// apagado à mão.
+    pub fn delete_replica(&self, device_id: &str) {
+        self.files().replicas.remove(device_id);
+    }
+
     /// Com `false`, a pasta fica indisponível: as leituras e as escritas pela
     /// interface [`Storage`] falham com [`StorageError::Unavailable`] e nada muda.
     pub fn set_available(&self, available: bool) {
@@ -106,6 +112,10 @@ impl Storage for MemoryVaultFolder {
     fn write_keyring(&self, bytes: Vec<u8>) -> Result<(), StorageError> {
         self.writable_files()?.keyring = Some(bytes);
         Ok(())
+    }
+
+    fn list_replicas(&self) -> Result<Vec<String>, StorageError> {
+        Ok(self.available_files()?.replicas.keys().cloned().collect())
     }
 
     fn read_replica(&self, device_id: String) -> Result<Option<Vec<u8>>, StorageError> {

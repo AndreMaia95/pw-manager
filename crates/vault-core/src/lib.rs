@@ -16,8 +16,10 @@ mod generator;
 mod ids;
 mod kdf;
 mod keyring;
+mod merge;
 mod replica;
 mod search;
+mod stamp;
 mod storage;
 #[cfg(feature = "testing")]
 pub mod testing;
@@ -29,5 +31,6 @@ pub use entry::{EntryChanges, EntryFields, EntryState, EntrySummary, HistoryVers
 pub use error::{StorageError, VaultError};
 pub use generator::{GeneratorSettings, PassphraseSeparator};
 pub use kdf::KdfParams;
+pub use merge::{MergeReport, SkipReason, SkippedReplica};
 pub use storage::Storage;
 pub use vault::Vault;

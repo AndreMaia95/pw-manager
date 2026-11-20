@@ -2,7 +2,8 @@
 
 use vault_core::{
     EntryChanges, EntryFields, EntryState, EntrySummary, GeneratorSettings, HistoryVersion,
-    KdfParams, PassphraseSeparator, SecretField, StorageError, SystemClock, Vault, VaultError,
+    KdfParams, MergeReport, PassphraseSeparator, SecretField, SkippedReplica, StorageError,
+    SystemClock, Vault, VaultError,
 };
 
 fn assert_send_sync<T: Send + Sync + 'static>() {}
@@ -22,4 +23,6 @@ fn public_types_can_cross_threads_as_uniffi_requires() {
     assert_send_sync::<HistoryVersion>();
     assert_send_sync::<GeneratorSettings>();
     assert_send_sync::<PassphraseSeparator>();
+    assert_send_sync::<MergeReport>();
+    assert_send_sync::<SkippedReplica>();
 }

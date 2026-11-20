@@ -3,7 +3,7 @@
 mod common;
 
 use common::cbor::{array, bytes, map, text, uint};
-use common::{PASSWORD, START_MS, TestDevice, TestEnv, from_hex};
+use common::{PASSWORD, START_MS, TestDevice, TestEnv, from_hex, stamp};
 use vault_core::testing;
 use vault_core::{EntryChanges, EntryFields, EntryState, SecretField, Vault, VaultError};
 
@@ -187,18 +187,22 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
-/// As lápides que o corpo da réplica tem de levar: só o id e a data.
-fn tombstones(deleted: &[(&str, i64)]) -> Vec<u8> {
+/// As lápides que o corpo da réplica tem de levar: só o id, o carimbo (como
+/// item CBOR, de [`stamp`]) e a data.
+fn tombstones(deleted: &[(&str, Vec<u8>, i64)]) -> Vec<u8> {
     let tombstones: Vec<Vec<u8>> = deleted
         .iter()
-        .map(|(id, deleted_at_ms)| {
-            map(&[
-                ("id", bytes(&from_hex(id))),
-                ("deleted_at_ms", uint(*deleted_at_ms as u64)),
-            ])
-        })
+        .map(|(id, stamp, deleted_at_ms)| tombstone(id, stamp.clone(), *deleted_at_ms))
         .collect();
     [text("tombstones"), array(&tombstones)].concat()
+}
+
+fn tombstone(id: &str, stamp: Vec<u8>, deleted_at_ms: i64) -> Vec<u8> {
+    map(&[
+        ("id", bytes(&from_hex(id))),
+        ("stamp", stamp),
+        ("deleted_at_ms", uint(deleted_at_ms as u64)),
+    ])
 }
 
 /// Uma entrada "Banco" com uma versão no histórico, para provar que nada dela
@@ -280,7 +284,12 @@ fn deleting_permanently_leaves_only_a_tombstone_with_the_id_and_the_date() {
     assert_eq!(titles(vault.list_entries().unwrap()), ["Correio"]);
     let body = replica_body(&device, &vault);
     assert_nothing_of_banco_in(&body);
-    assert!(contains(&body, &tombstones(&[(&banco, START_MS + 60_000)])));
+    // A lápide leva o carimbo da alteração que apagou a entrada (ADR-0003).
+    let deleted = stamp(START_MS + 60_000, 0, &vault.device_id());
+    assert!(contains(
+        &body,
+        &tombstones(&[(&banco, deleted, START_MS + 60_000)])
+    ));
 }
 
 #[test]
@@ -295,7 +304,11 @@ fn an_entry_in_the_trash_can_be_deleted_permanently_too() {
     assert_gone(&vault, &banco);
     let body = replica_body(&device, &vault);
     assert_nothing_of_banco_in(&body);
-    assert!(contains(&body, &tombstones(&[(&banco, START_MS + 60_000)])));
+    let deleted = stamp(START_MS + 60_000, 0, &vault.device_id());
+    assert!(contains(
+        &body,
+        &tombstones(&[(&banco, deleted, START_MS + 60_000)])
+    ));
 }
 
 #[test]
@@ -316,9 +329,11 @@ fn emptying_the_trash_turns_every_entry_in_it_into_a_tombstone_at_once() {
     assert_eq!(titles(vault.list_entries().unwrap()), ["Loja"]);
     let body = replica_body(&device, &vault);
     assert_nothing_of_banco_in(&body);
+    // As duas lápides são a mesma alteração, com o mesmo carimbo.
+    let emptied = stamp(START_MS + 60_000, 0, &vault.device_id());
     let mut deleted = [
-        (banco.as_str(), START_MS + 60_000),
-        (correio.as_str(), START_MS + 60_000),
+        (banco.as_str(), emptied.clone(), START_MS + 60_000),
+        (correio.as_str(), emptied, START_MS + 60_000),
     ];
     deleted.sort();
     assert!(contains(&body, &tombstones(&deleted)));
@@ -352,40 +367,62 @@ fn the_replica_loses_an_expired_entry_at_the_next_unlock() {
     let body = replica_body(&device, &vault);
     assert_nothing_of_banco_in(&body);
     // A lápide fica com a data em que a entrada expirou, e não com a do
-    // desbloqueio: todos os dispositivos lhe dão a mesma.
+    // desbloqueio, e com o carimbo da ida para o Lixo (a terceira alteração do
+    // dispositivo no mesmo milissegundo), e não com um novo: todos os
+    // dispositivos lhe dão a mesma.
+    let trashed = stamp(START_MS, 2, &vault.device_id());
     assert!(contains(
         &body,
-        &tombstones(&[(&banco, START_MS + 30 * DAY_MS)])
+        &tombstones(&[(&banco, trashed, START_MS + 30 * DAY_MS)])
     ));
 }
 
-/// Reescreve a réplica com uma lápide de `tombstone_id` acrescentada ao corpo,
-/// que acaba no array das entradas: a lápide vai a seguir, pela ordem canónica.
-fn add_tombstone_to_replica(device: &TestDevice, vault: &Vault, tombstone_id: &str) {
+/// Reescreve a réplica com uma lápide de `tombstone_id`, com o carimbo
+/// `deleted`, acrescentada ao corpo, que acaba no array das entradas: a lápide
+/// vai a seguir, pela ordem canónica.
+fn add_tombstone_to_replica(
+    device: &TestDevice,
+    vault: &Vault,
+    tombstone_id: &str,
+    deleted: Vec<u8>,
+) {
     let device_id = vault.device_id();
     let mut replica = testing::open_replica(&device.folder, &device_id, PASSWORD).unwrap();
     replica.body[0] += 1;
-    replica.body.extend(tombstones(&[(tombstone_id, START_MS)]));
+    replica
+        .body
+        .extend(tombstones(&[(tombstone_id, deleted, START_MS)]));
     testing::write_replica(&device.folder, &device_id, PASSWORD, replica).unwrap();
 }
 
 #[test]
-fn a_replica_with_an_entry_that_is_also_a_tombstone_is_rejected() {
-    // Uma lápide de outro id é aceite, por isso a rejeição vem da sobreposição.
-    let unlock_with_tombstone_of = |tombstone_of_banco: bool| {
+fn a_replica_with_an_entry_that_is_also_a_tombstone_is_rejected_unless_the_entry_is_newer() {
+    // Uma entrada só fica ao lado da sua lápide quando uma edição posterior à
+    // lápide lhe ganhou numa fusão: a entrada e todo o seu histórico têm de ser
+    // posteriores à lápide. "Banco" tem a versão (START_MS, 0) no histórico e a
+    // atual é (START_MS, 1).
+    let unlock_with_tombstone = |tombstone_of_banco: bool, ms: i64, counter: u32| {
         let (device, vault) = new_vault();
-        let banco = vault.create_entry(entry("Banco")).unwrap();
+        let banco = banco_with_history(&vault);
         let other = "77777777777777777777777777777777";
         let tombstone_id = if tombstone_of_banco { &banco } else { other };
-        add_tombstone_to_replica(&device, &vault, tombstone_id);
+        let deleted = stamp(ms, counter, &vault.device_id());
+        add_tombstone_to_replica(&device, &vault, tombstone_id, deleted);
         vault.lock();
         vault.unlock_with_master_password(PASSWORD)
     };
 
-    assert_eq!(unlock_with_tombstone_of(false), Ok(()));
+    assert_eq!(unlock_with_tombstone(false, START_MS + 1, 0), Ok(()));
+    assert_eq!(unlock_with_tombstone(true, START_MS - 1, 0), Ok(()));
     assert_eq!(
-        unlock_with_tombstone_of(true),
-        Err(VaultError::ReplicaRejected)
+        unlock_with_tombstone(true, START_MS, 0),
+        Err(VaultError::ReplicaRejected),
+        "uma versão do histórico não é posterior à lápide"
+    );
+    assert_eq!(
+        unlock_with_tombstone(true, START_MS, 1),
+        Err(VaultError::ReplicaRejected),
+        "a lápide vence a entrada num empate"
     );
 }
 
@@ -409,8 +446,9 @@ fn an_expired_entry_leaves_the_replica_at_the_next_write_if_the_unlock_rewrite_f
 
     let body = replica_body(&device, &vault);
     assert_nothing_of_banco_in(&body);
+    let trashed = stamp(START_MS, 2, &vault.device_id());
     assert!(contains(
         &body,
-        &tombstones(&[(&banco, START_MS + 30 * DAY_MS)])
+        &tombstones(&[(&banco, trashed, START_MS + 30 * DAY_MS)])
     ));
 }

@@ -1,8 +1,13 @@
 //! Gera um vetor de teste do formato com a versão atual (ADR-0016).
 //!
 //! ```text
-//! cargo run -p vault-core --example generate_format_vector -- <nome> [--with-unknown-fields | --with-trash-and-history | --with-generator-settings]
+//! cargo run -p vault-core --example generate_format_vector -- <nome> [--with-unknown-fields | --with-trash-and-history | --with-generator-settings | --with-two-devices]
 //! ```
+//!
+//! Com `--with-two-devices`, um segundo dispositivo junta-se ao cofre e os
+//! dois editam a mesma entrada; um apaga definitivamente a outra entrada, que o
+//! outro edita depois, e uma terceira só fica como lápide. Os dois fundem, e
+//! a pasta do vetor leva as duas réplicas (ticket 09).
 //!
 //! Com `--with-generator-settings`, a entrada "GitHub" leva uma palavra-passe
 //! gerada com ajustes próprios e a outra uma frase-passe (ticket 08).
@@ -81,30 +86,41 @@ fn main() -> ExitCode {
     let with_unknown_fields = flag("--with-unknown-fields");
     let with_trash_and_history = flag("--with-trash-and-history");
     let with_generator_settings = flag("--with-generator-settings");
+    let with_two_devices = flag("--with-two-devices");
     let name = match args.as_slice() {
         [name] => name.clone(),
-        [name, _] if with_unknown_fields || with_trash_and_history || with_generator_settings => {
+        [name, _]
+            if with_unknown_fields
+                || with_trash_and_history
+                || with_generator_settings
+                || with_two_devices =>
+        {
             name.clone()
         }
         _ => {
             eprintln!(
-                "uso: generate_format_vector <nome> [--with-unknown-fields | --with-trash-and-history | --with-generator-settings], p. ex. single-device"
+                "uso: generate_format_vector <nome> [--with-unknown-fields | --with-trash-and-history | --with-generator-settings | --with-two-devices], p. ex. single-device"
             );
             return ExitCode::FAILURE;
         }
     };
+    // Devolve também os ids das entradas apagadas definitivamente.
     let write = |master_password: &str| {
         let (folder, clock, vault) = write_vault(master_password);
+        let mut deleted = Vec::new();
         if with_unknown_fields {
             add_unknown_fields(&folder, &vault, master_password);
         }
         if with_trash_and_history {
-            add_trash_and_history(&clock, &vault);
+            deleted.push(add_trash_and_history(&clock, &vault));
         }
         if with_generator_settings {
             add_generator_settings(&vault);
         }
-        (folder, vault)
+        if with_two_devices {
+            deleted.extend(add_second_device(&folder, &clock, &vault, master_password));
+        }
+        (folder, vault, deleted)
     };
 
     // A palavra-passe leva a versão, que só se conhece depois de escrever; o
@@ -125,7 +141,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let master_password = format!("vetor de teste {version}");
-    let (folder, vault) = write(&master_password);
+    let (folder, vault, deleted) = write(&master_password);
 
     fs::create_dir_all(dir.join("replicas")).expect("criar a pasta do vetor");
     fs::write(dir.join("keyring"), folder.keyring().expect("chaveiro")).expect("escrever");
@@ -141,7 +157,14 @@ fn main() -> ExitCode {
     let mut entries = String::new();
     let listed = vault.list_entries().expect("listar as entradas");
     let trashed = vault.list_trash().expect("listar o Lixo");
-    for entry in listed.into_iter().chain(trashed) {
+    let all: Vec<_> = listed.into_iter().chain(trashed).collect();
+    // As apagadas que voltaram, editadas depois noutro dispositivo, não são
+    // só lápides.
+    let tombstones: Vec<String> = deleted
+        .into_iter()
+        .filter(|id| all.iter().all(|entry| entry.id != *id))
+        .collect();
+    for entry in all {
         let reveal = |field| vault.reveal(&entry.id, field).expect("revelar");
         let state = match entry.state {
             EntryState::Active => "EntryState::Active".to_owned(),
@@ -229,10 +252,11 @@ fn main() -> ExitCode {
         } else {
             String::new()
         },
-        tombstones = match with_trash_and_history {
-            true => format!("{:?}", tombstone_id(&folder, &vault, &master_password)),
-            false => String::new(),
-        },
+        tombstones = tombstones
+            .iter()
+            .map(|id| format!("{id:?}"))
+            .collect::<Vec<_>>()
+            .join(", "),
     );
     ExitCode::SUCCESS
 }
@@ -294,8 +318,9 @@ fn add_unknown_fields(folder: &MemoryVaultFolder, vault: &Vault, master_password
 
 /// Acrescenta ao cofre, com o relógio a andar entre os passos: uma versão no
 /// histórico da entrada "GitHub" (palavra-passe mudada), uma entrada no Lixo e
-/// uma entrada apagada definitivamente, que fica só como lápide.
-fn add_trash_and_history(clock: &ManualClock, vault: &Vault) {
+/// uma entrada apagada definitivamente, que fica só como lápide. Devolve o id
+/// da apagada.
+fn add_trash_and_history(clock: &ManualClock, vault: &Vault) -> String {
     let github = vault
         .list_entries()
         .expect("listar as entradas")
@@ -332,6 +357,72 @@ fn add_trash_and_history(clock: &ManualClock, vault: &Vault) {
     vault
         .delete_entry_permanently(&deleted)
         .expect("apagar definitivamente");
+    deleted
+}
+
+/// Junta um segundo dispositivo, com relógio próprio, ao cofre de `vault`.
+/// Os dois editam a palavra-passe da entrada "GitHub" (ganha a do segundo, um
+/// dia depois); o primeiro apaga definitivamente a outra entrada, que o
+/// segundo edita depois, e cria uma terceira que apaga definitivamente. Os
+/// dois fundem. Devolve os ids das entradas apagadas.
+fn add_second_device(
+    folder: &MemoryVaultFolder,
+    clock: &ManualClock,
+    vault: &Vault,
+    master_password: &str,
+) -> Vec<String> {
+    let second_clock = ManualClock::new(CREATED_AT_MS);
+    let second = Vault::join(
+        Arc::new(folder.clone()),
+        Arc::new(second_clock.clone()),
+        master_password,
+    )
+    .expect("juntar o segundo dispositivo");
+    let entries = vault.list_entries().expect("listar as entradas");
+    let github = entries.iter().find(|entry| entry.title == "GitHub");
+    let github = &github.expect("a entrada GitHub").id;
+    let other = entries.iter().find(|entry| entry.title != "GitHub");
+    let other = &other.expect("a outra entrada").id;
+    let password = |password: &str| EntryChanges {
+        password: Some(password.to_owned()),
+        ..EntryChanges::default()
+    };
+
+    clock.advance(DAY_MS);
+    vault
+        .update_entry(github, password("vetor: palavra-passe 1, do primeiro"))
+        .expect("editar no primeiro");
+    vault
+        .delete_entry_permanently(other)
+        .expect("apagar no primeiro");
+    let deleted = vault
+        .create_entry(fields([
+            "Apagada",
+            "https://apagada.pt",
+            "apagado",
+            "vetor: palavra-passe 4",
+            "vetor: notas 4",
+        ]))
+        .expect("criar uma entrada");
+    vault
+        .delete_entry_permanently(&deleted)
+        .expect("apagar definitivamente");
+
+    second_clock.advance(2 * DAY_MS);
+    second
+        .update_entry(github, password("vetor: palavra-passe 1, do segundo"))
+        .expect("editar no segundo");
+    let notes = EntryChanges {
+        notes: Some("vetor: notas 2, do segundo".to_owned()),
+        ..EntryChanges::default()
+    };
+    second
+        .update_entry(other, notes)
+        .expect("editar no segundo");
+
+    vault.merge().expect("fundir no primeiro");
+    second.merge().expect("fundir no segundo");
+    vec![other.clone(), deleted]
 }
 
 /// Gera a palavra-passe da entrada "GitHub" com ajustes próprios (sem
@@ -354,25 +445,6 @@ fn add_generator_settings(vault: &Vault) {
             .generate_password(&entry.id, Some(settings))
             .expect("gerar");
     }
-}
-
-/// O id da única lápide do corpo da réplica: os 16 bytes a seguir à chave
-/// `id` do primeiro mapa depois de `tombstones`.
-fn tombstone_id(folder: &MemoryVaultFolder, vault: &Vault, master_password: &str) -> String {
-    let body = testing::open_replica(folder, &vault.device_id(), master_password)
-        .expect("decifrar a réplica")
-        .body;
-    let key = text("tombstones");
-    let at = body
-        .windows(key.len())
-        .position(|window| window == key)
-        .expect("a réplica tem lápides");
-    // Array de 1 elemento, mapa, chave "id", bytes de 16.
-    let prefix = [&[0x81, 0xa2][..], &text("id"), &[0x50]].concat();
-    let start = at + key.len();
-    assert_eq!(body[start..start + prefix.len()], prefix, "uma lápide");
-    let id = &body[start + prefix.len()..start + prefix.len() + 16];
-    id.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn fields([title, url, username, password, notes]: [&str; 5]) -> EntryFields {

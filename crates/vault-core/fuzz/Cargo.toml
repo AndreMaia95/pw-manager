@@ -35,3 +35,10 @@ path = "fuzz_targets/replica_body.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "merge"
+path = "fuzz_targets/merge.rs"
+test = false
+doc = false
+bench = false

@@ -73,7 +73,7 @@ jobs:
         run: cargo install cargo-fuzz --version 0.13.2 --locked
       - name: Semear o corpus com os vetores de teste
         run: |
-          mkdir -p fuzz/corpus/keyring fuzz/corpus/replica fuzz/corpus/replica_body
+          mkdir -p fuzz/corpus/keyring fuzz/corpus/replica fuzz/corpus/replica_body fuzz/corpus/merge
           for dir in tests/vectors/*/*/; do
             name=$(echo "$dir" | tr '/' '-')
             cp "$dir/keyring" "fuzz/corpus/keyring/$name"
@@ -83,9 +83,11 @@ jobs:
           done
           # {"created_at_ms": 0}, o mesmo que REPLICA_BODY_SEED em tests/fuzz_harnesses.rs.
           printf '\xa1\x6dcreated_at_ms\x00' > fuzz/corpus/replica_body/seed
+          # Dois corpos que se fundem, o mesmo que replica_bodies_to_merge_seed.
+          cp fuzz/seeds/merge/* fuzz/corpus/merge/
       - name: Fuzzing (60 s por alvo)
         run: |
-          for target in keyring replica replica_body; do
+          for target in keyring replica replica_body merge; do
             echo "::group::$target"
             cargo +nightly fuzz run "$target" -- -max_total_time=60
             echo "::endgroup::"

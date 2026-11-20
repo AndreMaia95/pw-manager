@@ -10,6 +10,9 @@ pub trait Storage: Send + Sync {
     /// O chaveiro da pasta do cofre, ou `None` se ainda não existe.
     fn read_keyring(&self) -> Result<Option<Vec<u8>>, StorageError>;
     fn write_keyring(&self, bytes: Vec<u8>) -> Result<(), StorageError>;
+    /// Os ids dos dispositivos com réplica na pasta do cofre. Um nome que não
+    /// seja um id de dispositivo é ignorado por quem lê.
+    fn list_replicas(&self) -> Result<Vec<String>, StorageError>;
     /// A réplica do dispositivo `device_id`, ou `None` se não existe.
     fn read_replica(&self, device_id: String) -> Result<Option<Vec<u8>>, StorageError>;
     fn write_replica(&self, device_id: String, bytes: Vec<u8>) -> Result<(), StorageError>;

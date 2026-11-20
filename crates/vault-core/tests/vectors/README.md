@@ -52,13 +52,21 @@ dados que os vetores existentes ainda não cobrem (entradas, histórico, lápide
 
    Com `--with-trash-and-history` no fim, o cofre do vetor leva também uma
    versão no histórico da entrada "GitHub", uma entrada no Lixo e uma lápide.
-   O id da lápide vai para `tombstones` em `ExpectedState`.
+   O id da lápide vai para `tombstones` em `ExpectedState` (o gerador
+   imprime-o).
 
    Com `--with-generator-settings` no fim, a entrada "GitHub" leva uma
    palavra-passe gerada com ajustes próprios e a outra uma frase-passe com os
    ajustes de omissão (separada por pontos), ambas com os ajustes do gerador
    guardados. O vetor `v1.0/with-generator-settings` é anterior à escolha do
    separador: a sua frase-passe é separada por espaços.
+
+   Com `--with-two-devices` no fim, um segundo dispositivo junta-se ao cofre:
+   os dois editam a palavra-passe da entrada "GitHub" (ganha a do segundo), o
+   primeiro apaga definitivamente a outra entrada, que o segundo edita depois,
+   e uma terceira que fica só como lápide; os dois fundem. A pasta do vetor
+   leva as duas réplicas, e `ExpectedState` descreve a do primeiro. Os ids
+   das entradas que só ficam como lápide vão para `tombstones`.
 
    O gerador lê a versão do formato dos bytes que escreveu e põe o vetor em
    `v<principal>.<secundária>/<nome>/`. Recusa-se a escrever sobre uma pasta que

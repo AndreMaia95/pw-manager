@@ -21,15 +21,20 @@ impl Id {
     }
 
     pub(crate) fn from_hex(text: &str) -> Option<Self> {
-        if text.len() != ID_LEN * 2 {
-            return None;
-        }
-        let mut bytes = [0u8; ID_LEN];
-        for (i, byte) in bytes.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(text.get(i * 2..i * 2 + 2)?, 16).ok()?;
-        }
-        Some(Id(bytes))
+        from_hex(text).map(Id)
     }
+}
+
+/// Exatamente `N` bytes em hexadecimal.
+pub(crate) fn from_hex<const N: usize>(text: &str) -> Option<[u8; N]> {
+    if text.len() != N * 2 {
+        return None;
+    }
+    let mut bytes = [0u8; N];
+    for (i, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(text.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    Some(bytes)
 }
 
 impl fmt::Display for Id {

@@ -68,6 +68,20 @@ impl TestDevice {
         )
     }
 
+    /// Junta este dispositivo ao cofre que já está na pasta do cofre, com a
+    /// palavra-passe mestra. Devolve-o desbloqueado.
+    pub fn join_vault(&self, password: &str) -> Vault {
+        self.try_join_vault(password).expect("juntar-se ao cofre")
+    }
+
+    pub fn try_join_vault(&self, password: &str) -> Result<Vault, VaultError> {
+        Vault::join(
+            Arc::new(self.folder.clone()),
+            Arc::new(self.clock.clone()),
+            password,
+        )
+    }
+
     /// Abre (bloqueado) um cofre existente como o dispositivo `device_id`,
     /// como acontece quando a app volta a arrancar.
     pub fn open_vault(&self, device_id: &str) -> Vault {
@@ -78,6 +92,18 @@ impl TestDevice {
         )
         .expect("abrir o cofre")
     }
+}
+
+/// Um carimbo (ADR-0003) como item CBOR: bytes com a data i64 BE, o contador
+/// u32 BE e o id do dispositivo.
+pub fn stamp(ms: i64, counter: u32, device_id: &str) -> Vec<u8> {
+    let content = [
+        ms.to_be_bytes().as_slice(),
+        &counter.to_be_bytes(),
+        &from_hex(device_id),
+    ]
+    .concat();
+    cbor::bytes(&content)
 }
 
 /// Os bytes de um id em hexadecimal.

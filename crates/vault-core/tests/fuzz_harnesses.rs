@@ -8,7 +8,7 @@ mod common;
 use std::fs;
 
 use common::cbor::{array, bytes, map, text, uint};
-use common::vector_dirs;
+use common::{stamp, vector_dirs};
 use proptest::prelude::*;
 use vault_core::fuzzing;
 
@@ -151,6 +151,87 @@ fn the_replica_body_decoder_survives_a_body_with_generator_settings_and_its_muta
     for_each_mutation(&seed, fuzzing::replica_body);
 }
 
+/// Dois corpos com carimbos (ticket 09), como os de duas réplicas que se
+/// fundem: a mesma entrada editada nos dois, com uma versão no histórico; no
+/// segundo, a entrada é posterior a uma lápide dela; e um campo desconhecido
+/// com a mesma chave e valores diferentes. Pela ordem canónica (ADR-0008).
+fn replica_bodies_to_merge_seed() -> (Vec<u8>, Vec<u8>) {
+    let (one, two) = ("01".repeat(16), "02".repeat(16));
+    let entry = |stamp: Vec<u8>, password: &str, history: Option<Vec<u8>>| {
+        let mut fields = vec![
+            ("id", bytes(&[0x5a; 16])),
+            ("url", text("https://a.pt")),
+            ("notes", text("n")),
+            ("stamp", stamp),
+            ("title", text("a.pt")),
+        ];
+        fields.extend(history.map(|history| ("history", history)));
+        fields.extend([("password", text(password)), ("username", text("u"))]);
+        map(&fields)
+    };
+    let version = map(&[
+        ("url", text("https://a.pt")),
+        ("notes", text("n")),
+        ("stamp", stamp(1, 0, &one)),
+        ("title", text("a.pt")),
+        ("password", text("p1")),
+        ("username", text("u")),
+        ("replaced_at_ms", uint(3)),
+    ]);
+    let first = map(&[
+        ("created_at_ms", uint(0)),
+        (
+            "entries",
+            array(&[entry(stamp(3, 0, &one), "p3", Some(array(&[version])))]),
+        ),
+        ("from_v1_1", uint(1)),
+    ]);
+    let tombstone = map(&[
+        ("id", bytes(&[0x5a; 16])),
+        ("stamp", stamp(2, 0, &two)),
+        ("deleted_at_ms", uint(2)),
+    ]);
+    let second = map(&[
+        ("created_at_ms", uint(0)),
+        ("entries", array(&[entry(stamp(4, 0, &two), "p4", None)])),
+        ("from_v1_1", uint(2)),
+        ("tombstones", array(&[tombstone])),
+    ]);
+    (first, second)
+}
+
+#[test]
+fn the_merge_survives_two_bodies_and_their_mutations() {
+    let (first, second) = replica_bodies_to_merge_seed();
+    for body in [&first, &second] {
+        assert!(
+            fuzzing::replica_body_is_accepted(body),
+            "a semente é válida"
+        );
+    }
+    for_each_mutation(&fuzzing::merge_input(&first, &second), fuzzing::merge);
+    // Com um corpo de antes dos carimbos.
+    let before_stamps = replica_body_with_trash_and_history_seed();
+    for_each_mutation(
+        &fuzzing::merge_input(&before_stamps, &first),
+        fuzzing::merge,
+    );
+}
+
+/// O CI semeia o alvo `merge` do cargo-fuzz com este ficheiro.
+#[test]
+fn the_merge_seed_of_the_fuzzer_is_the_one_tested_here() {
+    let (first, second) = replica_bodies_to_merge_seed();
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fuzz/seeds/merge/two-replica-bodies"
+    );
+    assert_eq!(
+        fs::read(path).unwrap(),
+        fuzzing::merge_input(&first, &second)
+    );
+}
+
 #[test]
 fn a_deeply_nested_unknown_value_is_rejected_without_exhausting_the_stack() {
     let deeply_nested = [vec![0x81; 100_000], vec![0x00]].concat();
@@ -173,6 +254,11 @@ proptest! {
     #[test]
     fn the_replica_body_decoder_survives_arbitrary_bytes(data in any::<Vec<u8>>()) {
         fuzzing::replica_body(&data);
+    }
+
+    #[test]
+    fn the_merge_survives_arbitrary_bytes(data in any::<Vec<u8>>()) {
+        fuzzing::merge(&data);
     }
 }
 

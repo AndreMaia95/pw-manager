@@ -1,7 +1,5 @@
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::cbor::UnknownFields;
 use crate::crypto::{self, SecretKey};
 use crate::entry::{
     Entry, EntryChanges, EntryFields, EntryId, EntrySummary, HistoryVersion, PendingChanges,
@@ -10,6 +8,7 @@ use crate::entry::{
 use crate::generator::{self, GeneratorSettings};
 use crate::ids::{DeviceId, Id, VaultId};
 use crate::keyring::Keyring;
+use crate::merge::{MergeReport, SkipReason, SkippedReplica};
 use crate::replica::{self, ReplicaBody, ReplicaOwner};
 use crate::search::Query;
 use crate::{Clock, KdfParams, Storage, VaultError};
@@ -30,6 +29,10 @@ struct Session {
     vault_key: SecretKey,
     generation: u64,
     body: ReplicaBody,
+    /// O estado em memória mudou sem a réplica ser escrita: uma entrada
+    /// expirou no Lixo numa leitura, ou a escrita que se seguiu falhou. A
+    /// próxima escrita leva-o, e a fusão escreve mesmo sem nada de novo.
+    unsaved: bool,
 }
 
 impl Vault {
@@ -77,14 +80,60 @@ impl Vault {
             session: Mutex::new(Some(Session {
                 vault_key,
                 generation: FIRST_GENERATION,
-                body: ReplicaBody {
-                    created_at_ms,
-                    entries: BTreeMap::new(),
-                    tombstones: BTreeMap::new(),
-                    unknown: UnknownFields::default(),
-                },
+                body: ReplicaBody::empty(created_at_ms),
+                unsaved: true,
             })),
         };
+        vault.save_replica()?;
+        Ok(vault)
+    }
+
+    /// Junta este dispositivo ao cofre que já está na pasta do cofre, com um id
+    /// de dispositivo próprio: desembrulha a chave do cofre com a palavra-passe
+    /// mestra, funde as réplicas de todos os outros dispositivos e escreve a
+    /// sua própria réplica. Devolve o cofre desbloqueado.
+    ///
+    /// Uma réplica de uma versão principal do formato mais recente dá
+    /// [`VaultError::UpdateRequired`], sem escrever nada: esta app não sabe ler
+    /// o cofre todo (ADR-0008). Uma réplica rejeitada fica de fora, como em
+    /// [`Vault::merge`]. Nesta versão o dispositivo entra sem ter de ser aceite
+    /// e sem assinaturas (tickets 10 e 11).
+    pub fn join(
+        storage: Arc<dyn Storage>,
+        clock: Arc<dyn Clock>,
+        master_password: &str,
+    ) -> Result<Self, VaultError> {
+        let keyring = read_keyring(storage.as_ref())?;
+        let vault_key = keyring.open_master_password_envelope(master_password)?;
+        let vault = Self {
+            storage,
+            clock,
+            vault_id: keyring.vault_id(),
+            device_id: Id::random()?,
+            session: Mutex::new(None),
+        };
+        let generation = keyring.generation();
+        let (others, skipped) = vault.read_other_replicas(&vault_key, generation)?;
+        if skipped
+            .iter()
+            .any(|replica| replica.reason == SkipReason::UpdateRequired)
+        {
+            return Err(VaultError::UpdateRequired);
+        }
+        let mut others = others.into_iter();
+        // Um cofre sem nenhuma réplica legível começa vazio, criado agora.
+        let mut body = others
+            .next()
+            .unwrap_or_else(|| ReplicaBody::empty(vault.clock.now_ms()));
+        for other in others {
+            body.merge(other);
+        }
+        *vault.session() = Some(Session {
+            vault_key,
+            generation,
+            body,
+            unsaved: true,
+        });
         vault.save_replica()?;
         Ok(vault)
     }
@@ -123,12 +172,13 @@ impl Vault {
             vault_key,
             generation: keyring.generation(),
             body,
+            unsaved: false,
         };
         if session.body.expire_trash(self.clock.now_ms()) {
             // As entradas que expiraram no Lixo saem já da réplica. Se a
             // escrita falhar, o desbloqueio não falha por isso: saem da
-            // memória agora e da réplica na próxima alteração.
-            let _ = self.write_replica(&session, &session.body);
+            // memória agora e da réplica na próxima escrita.
+            session.unsaved = self.write_replica(&session, &session.body).is_err();
         }
         *self.session() = Some(session);
         Ok(())
@@ -166,7 +216,9 @@ impl Vault {
         let mut entry = Entry::new(fields);
         let id = Id::random()?;
         entry.id = id;
+        let now_ms = self.clock.now_ms();
         self.change(|body| {
+            entry.stamp = body.next_stamp(now_ms, self.device_id);
             body.entries.insert(id, entry);
             Ok(())
         })?;
@@ -224,7 +276,9 @@ impl Vault {
     /// nova: a versão atual vai para o histórico, e a restaurada continua lá.
     pub fn restore_version(&self, entry_id: &str, version_id: &str) -> Result<(), VaultError> {
         let version_id = parse_version_id(version_id)?;
-        self.change_entry(entry_id, |entry, now_ms| entry.restore(version_id, now_ms))
+        self.change_entry(entry_id, move |entry, now_ms| {
+            entry.restore(version_id, now_ms)
+        })
     }
 
     /// O histórico da entrada, só com metadados, da versão mais recente para a
@@ -274,9 +328,12 @@ impl Vault {
     pub fn delete_entry_permanently(&self, entry_id: &str) -> Result<(), VaultError> {
         let id = parse_entry_id(entry_id)?;
         let now_ms = self.clock.now_ms();
-        self.change(|body| match body.delete_permanently(id, now_ms) {
-            true => Ok(()),
-            false => Err(VaultError::EntryNotFound),
+        self.change(|body| {
+            let stamp = body.next_stamp(now_ms, self.device_id);
+            match body.delete_permanently(id, now_ms, stamp) {
+                true => Ok(()),
+                false => Err(VaultError::EntryNotFound),
+            }
         })
     }
 
@@ -284,7 +341,7 @@ impl Vault {
     pub fn empty_trash(&self) -> Result<(), VaultError> {
         let now_ms = self.clock.now_ms();
         self.change(|body| {
-            body.empty_trash(now_ms);
+            body.empty_trash(now_ms, self.device_id);
             Ok(())
         })
     }
@@ -329,12 +386,41 @@ impl Vault {
         self.read_now(|body| Ok(entry(body, entry_id)?.secret(field).to_owned()))
     }
 
+    /// Funde neste dispositivo as réplicas dos outros dispositivos na pasta do
+    /// cofre, e escreve a sua réplica se o estado mudou. Só escreve a réplica
+    /// deste dispositivo (ADR-0002).
+    ///
+    /// Uma réplica que não se consegue ler fica de fora e é indicada no
+    /// resultado, sem mudar o estado do cofre. Nesta versão entram na fusão as
+    /// réplicas de todos os dispositivos, sem aceitação nem assinaturas
+    /// (tickets 10 e 11). Se a escrita da réplica falhar, o estado fica como
+    /// estava.
+    pub fn merge(&self) -> Result<MergeReport, VaultError> {
+        let mut session = self.session();
+        let session = session.as_mut().ok_or(VaultError::Locked)?;
+        let (others, skipped) = self.read_other_replicas(&session.vault_key, session.generation)?;
+        let mut body = session.body.clone();
+        for other in others {
+            body.merge(other);
+        }
+        // Uma entrada vinda de outra réplica pode já ter expirado no Lixo.
+        body.expire_trash(self.clock.now_ms());
+        if body != session.body || session.unsaved {
+            self.write_replica(session, &body)?;
+            session.body = body;
+            session.unsaved = false;
+        }
+        Ok(MergeReport { skipped })
+    }
+
     /// Cifra o estado atual e escreve a réplica deste dispositivo na pasta do cofre.
     pub fn save_replica(&self) -> Result<(), VaultError> {
         let mut session = self.session();
         let session = session.as_mut().ok_or(VaultError::Locked)?;
-        session.body.expire_trash(self.clock.now_ms());
-        self.write_replica(session, &session.body)
+        self.expire_trash(session);
+        self.write_replica(session, &session.body)?;
+        session.unsaved = false;
+        Ok(())
     }
 
     /// Dá a `read` o estado atual, com o Lixo expirado à hora do relógio. A
@@ -346,8 +432,15 @@ impl Vault {
     ) -> Result<T, VaultError> {
         let mut session = self.session();
         let session = session.as_mut().ok_or(VaultError::Locked)?;
-        session.body.expire_trash(self.clock.now_ms());
+        self.expire_trash(session);
         read(&session.body)
+    }
+
+    /// Expira o Lixo do estado em memória à hora do relógio, sem escrever.
+    fn expire_trash(&self, session: &mut Session) {
+        if session.body.expire_trash(self.clock.now_ms()) {
+            session.unsaved = true;
+        }
     }
 
     /// Aplica `edit` a uma cópia do estado, grava-a na réplica e só então a
@@ -360,16 +453,19 @@ impl Vault {
     ) -> Result<T, VaultError> {
         let mut session = self.session();
         let session = session.as_mut().ok_or(VaultError::Locked)?;
-        session.body.expire_trash(self.clock.now_ms());
+        self.expire_trash(session);
         let mut body = session.body.clone();
         let result = edit(&mut body)?;
         self.write_replica(session, &body)?;
         session.body = body;
+        session.unsaved = false;
         Ok(result)
     }
 
     /// Aplica `edit` à entrada `entry_id`, com a hora do relógio, como em
-    /// [`Vault::change`].
+    /// [`Vault::change`]. Se a entrada mudar, leva um carimbo novo (ADR-0003);
+    /// se não, fica com o que tinha, para não ganhar a uma alteração real
+    /// noutro dispositivo.
     fn change_entry(
         &self,
         entry_id: &str,
@@ -378,8 +474,14 @@ impl Vault {
         let id = parse_entry_id(entry_id)?;
         let now_ms = self.clock.now_ms();
         self.change(|body| {
+            let stamp = body.next_stamp(now_ms, self.device_id);
             let entry = body.entries.get_mut(&id).ok_or(VaultError::EntryNotFound)?;
-            edit(entry, now_ms)
+            let before = entry.clone();
+            edit(entry, now_ms)?;
+            if *entry != before {
+                entry.stamp = stamp;
+            }
+            Ok(())
         })
     }
 
@@ -387,6 +489,45 @@ impl Vault {
         let bytes = replica::seal(&self.owner(session.generation), &session.vault_key, body)?;
         self.storage.write_replica(self.device_id(), bytes)?;
         Ok(())
+    }
+
+    /// Lê e decifra as réplicas dos outros dispositivos na pasta do cofre,
+    /// pela ordem do id do dispositivo. Devolve também as que não se
+    /// conseguiram ler. Um ficheiro cujo nome não é um id de dispositivo não é
+    /// uma réplica, e é ignorado.
+    fn read_other_replicas(
+        &self,
+        vault_key: &SecretKey,
+        generation: u64,
+    ) -> Result<(Vec<ReplicaBody>, Vec<SkippedReplica>), VaultError> {
+        let mut bodies = Vec::new();
+        let mut skipped = Vec::new();
+        let mut names = self.storage.list_replicas()?;
+        names.sort();
+        for name in names {
+            let Some(device_id) = Id::from_hex(&name) else {
+                continue;
+            };
+            if device_id == self.device_id {
+                continue;
+            }
+            let Some(bytes) = self.storage.read_replica(name)? else {
+                continue;
+            };
+            let owner = ReplicaOwner {
+                vault_id: self.vault_id,
+                device_id,
+                generation,
+            };
+            match replica::open(&bytes, &owner, vault_key) {
+                Ok(body) => bodies.push(body),
+                Err(error) => skipped.push(SkippedReplica {
+                    device_id: device_id.to_string(),
+                    reason: SkipReason::of(&error),
+                }),
+            }
+        }
+        Ok((bodies, skipped))
     }
 
     fn owner(&self, generation: u64) -> ReplicaOwner {
@@ -416,9 +557,9 @@ fn parse_entry_id(entry_id: &str) -> Result<EntryId, VaultError> {
     Id::from_hex(entry_id).ok_or(VaultError::EntryNotFound)
 }
 
-/// Um id que não é hexadecimal válido não é de nenhuma versão.
+/// Um id que não é válido não é de nenhuma versão.
 fn parse_version_id(version_id: &str) -> Result<VersionId, VaultError> {
-    Id::from_hex(version_id).ok_or(VaultError::VersionNotFound)
+    VersionId::parse(version_id).ok_or(VaultError::VersionNotFound)
 }
 
 fn read_keyring(storage: &dyn Storage) -> Result<Keyring, VaultError> {

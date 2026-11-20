@@ -106,6 +106,28 @@ impl<'a> MapReader<'a> {
 #[derive(Clone, Default, PartialEq, Eq)]
 pub(crate) struct UnknownFields(Vec<(String, Zeroizing<Vec<u8>>)>);
 
+impl UnknownFields {
+    /// Junta os campos de `other` (ADR-0008). Um campo que os dois têm fica
+    /// com o valor de maior codificação: esta versão não sabe fundir um campo
+    /// que não conhece, mas assim a escolha não depende da ordem da fusão.
+    pub(crate) fn merge(&mut self, other: UnknownFields) {
+        for (key, value) in other.0 {
+            match self.0.iter_mut().find(|(other, _)| *other == key) {
+                Some((_, kept)) => {
+                    if value.as_slice() > kept.as_slice() {
+                        *kept = value;
+                    }
+                }
+                None => self.0.push((key, value)),
+            }
+        }
+        // A ordem em que o leitor os deixa: a dos bytes da chave codificada,
+        // que numa chave de texto é o comprimento e depois os bytes.
+        self.0
+            .sort_by(|(a, _), (b, _)| (a.len(), a.as_bytes()).cmp(&(b.len(), b.as_bytes())));
+    }
+}
+
 impl fmt::Debug for UnknownFields {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let sizes = self.0.iter().map(|(key, value)| (key, value.len()));

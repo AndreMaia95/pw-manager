@@ -9,10 +9,17 @@
 //! corpo: CBOR cifrado com XChaCha20-Poly1305 pela chave do cofre
 //! ```
 //!
+//! Cada entrada, cada versão do histórico e cada lápide leva o carimbo da
+//! alteração que a escreveu (`stamp`, ticket 09); o que foi escrito antes de
+//! haver carimbos não o tem.
+//!
 //! O corpo é um mapa (ADR-0008). Nasceu na versão 1.0 com `created_at_ms`;
 //! `entries` e `tombstones` foram acrescentados depois e só são escritos
 //! quando não estão vazios. Cada um é um array de mapas, ordenado pelos bytes
-//! do id da entrada; um id não pode estar nos dois. Campos desconhecidos, no
+//! do id da entrada. Um id só está nos dois quando uma edição posterior à
+//! lápide lhe ganhou na fusão: a entrada e todo o seu histórico têm carimbos
+//! posteriores ao da lápide, que fica para apagar as versões anteriores que
+//! ainda cheguem de outras réplicas. Campos desconhecidos, no
 //! corpo, em cada entrada, em cada versão do histórico e em cada lápide, são
 //! preservados.
 
@@ -44,6 +51,18 @@ pub(crate) struct ReplicaBody {
     pub(crate) tombstones: BTreeMap<EntryId, Tombstone>,
     /// Campos escritos por uma versão mais nova, preservados (ADR-0008).
     pub(crate) unknown: UnknownFields,
+}
+
+impl ReplicaBody {
+    /// O estado de um cofre sem entradas, criado em `created_at_ms`.
+    pub(crate) fn empty(created_at_ms: i64) -> Self {
+        Self {
+            created_at_ms,
+            entries: BTreeMap::new(),
+            tombstones: BTreeMap::new(),
+            unknown: UnknownFields::default(),
+        }
+    }
 }
 
 /// A quem a réplica tem de pertencer para ser aceite.
@@ -136,8 +155,11 @@ fn parse_body(plaintext: &[u8]) -> Option<ReplicaBody> {
     if let Some(items) = map.take("tombstones") {
         for item in cbor::split_array(items)? {
             let tombstone = Tombstone::decode(item)?;
-            // Uma entrada apagada não pode continuar a existir.
-            if entries.contains_key(&tombstone.id) {
+            // Uma entrada apagada só continua a existir se for posterior à
+            // lápide, com todo o histórico.
+            if let Some(entry) = entries.get(&tombstone.id)
+                && !entry.is_all_after(tombstone.stamp)
+            {
                 return None;
             }
             tombstones.insert(tombstone.id, tombstone);

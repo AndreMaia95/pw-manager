@@ -1,4 +1,5 @@
-//! Alvos de fuzzing do leitor de cabeçalhos e do descodificador CBOR (ADR-0016).
+//! Alvos de fuzzing do leitor de cabeçalhos, do descodificador CBOR e da
+//! fusão (ADR-0016).
 //!
 //! Uma réplica ou um chaveiro na pasta do cofre podem vir de um atacante. Cada
 //! função recebe bytes arbitrários e entra em pânico se o leitor entrar em
@@ -13,7 +14,7 @@
 use crate::crypto::{self, KEY_LEN, NONCE_LEN, SecretKey};
 use crate::ids::Id;
 use crate::keyring::Keyring;
-use crate::replica::{self, ReplicaOwner};
+use crate::replica::{self, ReplicaBody, ReplicaOwner};
 use crate::{KdfParams, VaultError};
 
 const REPLICA_HEADER_LEN: usize = 72;
@@ -142,6 +143,51 @@ pub fn replica_body(data: &[u8]) {
         replica::decode_body(&[data, &[0]].concat()).is_err(),
         "aceitou bytes a mais depois do corpo"
     );
+}
+
+/// A fusão de dois corpos que o descodificador aceita, como os de duas
+/// réplicas. Os dados são o comprimento do primeiro corpo (u16 BE), o primeiro
+/// corpo e o segundo. A fusão não entra em pânico, dá o mesmo resultado pelas
+/// duas ordens, dá um corpo que o descodificador aceita, e fundir esse corpo
+/// consigo mesmo não o muda.
+pub fn merge(data: &[u8]) {
+    let Some((len, rest)) = data.split_first_chunk::<2>() else {
+        return;
+    };
+    let Some((a, b)) = rest.split_at_checked(usize::from(u16::from_be_bytes(*len))) else {
+        return;
+    };
+    let (Ok(a), Ok(b)) = (replica::decode_body(a), replica::decode_body(b)) else {
+        return;
+    };
+    let merged = |mut into: ReplicaBody, other: ReplicaBody| {
+        into.merge(other);
+        into
+    };
+    let ab = merged(a.clone(), b.clone());
+    let ba = merged(b, a);
+    let encoded = replica::encode_body(&ab);
+    assert_eq!(
+        *encoded,
+        *replica::encode_body(&ba),
+        "a fusão depende da ordem"
+    );
+    assert_eq!(
+        replica::decode_body(&encoded).as_ref(),
+        Ok(&ab),
+        "a fusão deu um corpo que o descodificador rejeita"
+    );
+    assert_eq!(
+        merged(ab.clone(), ab.clone()),
+        ab,
+        "fundir o resultado consigo mesmo mudou-o"
+    );
+}
+
+/// Junta dois corpos nos dados que [`merge`] recebe.
+pub fn merge_input(a: &[u8], b: &[u8]) -> Vec<u8> {
+    let len = u16::try_from(a.len()).expect("o primeiro corpo cabe em u16");
+    [len.to_be_bytes().as_slice(), a, b].concat()
 }
 
 /// O corpo é aceite pelo descodificador. Serve para os testes confirmarem que

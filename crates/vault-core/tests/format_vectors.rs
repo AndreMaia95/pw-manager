@@ -337,6 +337,65 @@ const VECTORS: &[FormatVector] = &[
             tombstones: &[],
         },
     },
+    // Dois dispositivos que fundiram (ticket 09): carimbos nas entradas, nas
+    // versões e nas lápides, uma versão perdida numa fusão, e uma entrada
+    // editada depois de apagada noutro dispositivo, ao lado da sua lápide.
+    FormatVector {
+        path: "v1.0/with-two-devices",
+        master_password: "vetor de teste v1.0",
+        expected: ExpectedState {
+            vault_id: "fb37251291ed858254b6f970b7f540f3",
+            device_id: "4b6c46edb2f6697f06e0f4bdb53bd6d6",
+            created_at_ms: 1_767_225_600_000,
+            entries: &[
+                ExpectedEntry {
+                    id: "6ffa5f550950c6fbe4701a5305aeda6e",
+                    title: "exemplo.pt",
+                    url: "https://www.exemplo.pt/entrar",
+                    username: "utilizador@exemplo.pt",
+                    password: "vetor: palavra-passe 2",
+                    notes: "vetor: notas 2, do segundo",
+                    state: EntryState::Active,
+                    // A versão anterior foi apagada com a entrada.
+                    history: &[],
+                    generator: DEFAULT_GENERATOR,
+                },
+                ExpectedEntry {
+                    id: "46a0b7d523a62febb6a119e1947d1c20",
+                    title: "GitHub",
+                    url: "https://github.com/login",
+                    username: "andre",
+                    password: "vetor: palavra-passe 1, do segundo",
+                    notes: "vetor: notas 1",
+                    state: EntryState::Active,
+                    history: &[
+                        // Perdeu na fusão: fica com a data do seu carimbo.
+                        ExpectedVersion {
+                            title: "GitHub",
+                            url: "https://github.com/login",
+                            username: "andre",
+                            password: "vetor: palavra-passe 1, do primeiro",
+                            notes: "vetor: notas 1",
+                            replaced_at_ms: 1_767_312_000_000,
+                        },
+                        // Substituída nos dois dispositivos: fica a cópia que
+                        // foi substituída mais tarde.
+                        ExpectedVersion {
+                            title: "GitHub",
+                            url: "https://github.com/login",
+                            username: "andre",
+                            password: "vetor: palavra-passe 1",
+                            notes: "vetor: notas 1",
+                            replaced_at_ms: 1_767_398_400_000,
+                        },
+                    ],
+                    generator: DEFAULT_GENERATOR,
+                },
+            ],
+            unknown_fields: &[],
+            tombstones: &["6604a5afc88e92955a6581b73a5b4aa3"],
+        },
+    },
 ];
 
 #[test]

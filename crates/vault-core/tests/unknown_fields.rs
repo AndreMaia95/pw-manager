@@ -4,7 +4,7 @@
 mod common;
 
 use common::cbor::{array, bytes, map, text, uint};
-use common::{PASSWORD, START_MS, TestEnv, from_hex};
+use common::{PASSWORD, START_MS, TestEnv, from_hex, stamp};
 use vault_core::testing::{self, MemoryVaultFolder};
 use vault_core::{EntryChanges, SecretField, VaultError};
 
@@ -27,19 +27,22 @@ const UNKNOWN_ENTRY_VALUE: &[u8] = b"\xa2\x61b\x01\x61a\x02";
 /// origem do corpo (`created_at_ms`), depois os acrescentados, conhecidos ou
 /// não, pelos bytes da chave codificada (o comprimento vem primeiro).
 fn newer_body(title: &str) -> Vec<u8> {
-    body_with_entry(title, None)
+    body_with_entry(title, None, None)
 }
 
-/// O corpo de [`newer_body`], com a entrada com o título `title` e, se dado, o
-/// histórico `history` (o array CBOR em bruto).
-fn body_with_entry(title: &str, history: Option<Vec<u8>>) -> Vec<u8> {
+/// O corpo de [`newer_body`], com a entrada com o título `title` e, se dados, o
+/// carimbo `stamp` e o histórico `history` (itens CBOR em bruto).
+fn body_with_entry(title: &str, stamp: Option<Vec<u8>>, history: Option<Vec<u8>>) -> Vec<u8> {
     let mut fields = vec![
         ("id", bytes(&ENTRY_ID)),
         ("url", text("https://github.com/login")),
         ("notes", text("códigos na gaveta")),
+    ];
+    fields.extend(stamp.map(|stamp| ("stamp", stamp)));
+    fields.extend([
         ("title", text(title)),
         ("colour", UNKNOWN_ENTRY_VALUE.to_vec()),
-    ];
+    ]);
     fields.extend(history.map(|history| ("history", history)));
     fields.extend([
         ("password", text("correto cavalo bateria")),
@@ -91,7 +94,9 @@ fn unknown_fields_from_a_newer_minor_version_survive_an_edit_byte_for_byte() {
     vault.update_entry(ENTRY_ID_HEX, changes).unwrap();
 
     // A edição guarda a versão anterior no histórico (ticket 07), só com os
-    // campos que esta versão conhece: o campo desconhecido fica na entrada.
+    // campos que esta versão conhece: o campo desconhecido fica na entrada. A
+    // versão anterior foi escrita sem carimbo, por isso leva o id da entrada;
+    // a atual leva o carimbo da edição (ticket 09).
     let version_id = &vault.entry_history(ENTRY_ID_HEX).unwrap()[0].id;
     let previous = map(&[
         ("id", bytes(&from_hex(version_id))),
@@ -103,9 +108,14 @@ fn unknown_fields_from_a_newer_minor_version_survive_an_edit_byte_for_byte() {
         ("replaced_at_ms", uint(START_MS as u64)),
     ]);
     let rewritten = testing::open_replica(&env.folder, &device_id, PASSWORD).unwrap();
+    assert_eq!(version_id, ENTRY_ID_HEX);
     assert_eq!(
         rewritten.body,
-        body_with_entry("GitHub pessoal", Some(array(&[previous])))
+        body_with_entry(
+            "GitHub pessoal",
+            Some(stamp(START_MS, 0, &device_id)),
+            Some(array(&[previous]))
+        )
     );
     // Escreve sempre a versão do formato desta app (ADR-0008).
     assert_eq!(rewritten.header[4..8], our_header[4..8]);
@@ -216,4 +226,62 @@ fn unknown_fields_in_a_history_version_and_a_tombstone_survive_a_rewrite_byte_fo
 
     let rewritten = testing::open_replica(&env.folder, &device_id, PASSWORD).unwrap();
     assert_eq!(rewritten.body, body);
+}
+
+#[test]
+fn unknown_fields_in_another_devices_replica_from_a_newer_minor_version_survive_a_merge() {
+    let env = TestEnv::new();
+    let [a, n] = [env.device(), env.device()];
+    let vault_a = a.create_vault(PASSWORD);
+    let device_n = n.join_vault(PASSWORD).device_id();
+    // N passa a ser de uma versão secundária mais nova: a sua réplica tem um
+    // campo desconhecido no corpo e outro numa entrada, com carimbo de N.
+    let newer = body_with_entry("GitHub", Some(stamp(START_MS, 0, &device_n)), None);
+    write_as_newer_minor_version(&env.folder, &device_n, newer.clone());
+
+    vault_a.merge().unwrap();
+
+    let device_a = vault_a.device_id();
+    let merged = testing::open_replica(&env.folder, &device_a, PASSWORD).unwrap();
+    assert_eq!(merged.body, newer, "fundida e reescrita pela réplica de A");
+    assert_eq!(
+        vault_a.reveal(ENTRY_ID_HEX, SecretField::Notes).as_deref(),
+        Ok("códigos na gaveta")
+    );
+
+    // Uma edição em A muda a entrada, mas não os campos desconhecidos.
+    a.clock.advance(60_000);
+    let changes = EntryChanges {
+        title: Some("GitHub pessoal".to_owned()),
+        ..EntryChanges::default()
+    };
+    vault_a.update_entry(ENTRY_ID_HEX, changes).unwrap();
+    let edited = testing::open_replica(&env.folder, &device_a, PASSWORD).unwrap();
+    let version_id = &vault_a.entry_history(ENTRY_ID_HEX).unwrap()[0].id;
+    let previous = map(&[
+        ("url", text("https://github.com/login")),
+        ("notes", text("códigos na gaveta")),
+        ("stamp", stamp(START_MS, 0, &device_n)),
+        ("title", text("GitHub")),
+        ("password", text("correto cavalo bateria")),
+        ("username", text("andre")),
+        ("replaced_at_ms", uint(START_MS as u64 + 60_000)),
+    ]);
+    assert_eq!(
+        version_id,
+        &hex(&stamp(START_MS, 0, &device_n)[2..]),
+        "o id de uma versão com carimbo é o carimbo"
+    );
+    assert_eq!(
+        edited.body,
+        body_with_entry(
+            "GitHub pessoal",
+            Some(stamp(START_MS + 60_000, 0, &device_a)),
+            Some(array(&[previous]))
+        )
+    );
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
