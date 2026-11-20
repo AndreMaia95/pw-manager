@@ -31,6 +31,14 @@ pub enum VaultError {
     /// Não há nenhuma entrada com este id (ou o id nem é válido).
     #[error("entrada não encontrada")]
     EntryNotFound,
+    /// A entrada está no Lixo: só pode ser revelada, recuperada ou apagada
+    /// definitivamente.
+    #[error("a entrada está no Lixo")]
+    EntryInTrash,
+    /// A entrada não tem nenhuma versão com este id no histórico (ou o id nem
+    /// é válido).
+    #[error("versão não encontrada no histórico da entrada")]
+    VersionNotFound,
     #[error("id de dispositivo inválido")]
     InvalidDeviceId,
     #[error("o gerador de aleatoriedade do sistema falhou")]

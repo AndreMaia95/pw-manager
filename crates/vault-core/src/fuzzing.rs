@@ -144,6 +144,12 @@ pub fn replica_body(data: &[u8]) {
     );
 }
 
+/// O corpo é aceite pelo descodificador. Serve para os testes confirmarem que
+/// uma semente é válida, e que as suas mutações partem de um corpo aceite.
+pub fn replica_body_is_accepted(data: &[u8]) -> bool {
+    replica::decode_body(data).is_ok()
+}
+
 /// Tem o identificador `magic` e uma versão principal acima de 1, a desta app.
 fn is_newer_major(data: &[u8], magic: &[u8; 4]) -> bool {
     data.len() >= 6 && data[0..4] == *magic && u16::from_be_bytes([data[4], data[5]]) > 1

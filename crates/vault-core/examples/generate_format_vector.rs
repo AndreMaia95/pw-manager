@@ -1,8 +1,11 @@
 //! Gera um vetor de teste do formato com a versão atual (ADR-0016).
 //!
 //! ```text
-//! cargo run -p vault-core --example generate_format_vector -- <nome> [--with-unknown-fields]
+//! cargo run -p vault-core --example generate_format_vector -- <nome> [--with-unknown-fields | --with-trash-and-history]
 //! ```
+//!
+//! Com `--with-trash-and-history`, o cofre do vetor leva também uma versão no
+//! histórico da entrada "GitHub", uma entrada no Lixo e uma lápide (ticket 07).
 //!
 //! Com `--with-unknown-fields`, a réplica do vetor é a que esta versão
 //! reescreve depois de ler uma réplica de uma versão secundária mais nova com
@@ -21,7 +24,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use vault_core::testing::{self, ManualClock, MemoryVaultFolder};
-use vault_core::{EntryChanges, EntryFields, KdfParams, SecretField, Vault};
+use vault_core::{EntryChanges, EntryFields, EntryState, KdfParams, SecretField, Vault};
 
 #[path = "../tests/common/cbor.rs"]
 mod cbor;
@@ -37,6 +40,7 @@ const KDF: KdfParams = KdfParams {
 };
 /// 2026-01-01T00:00:00Z.
 const CREATED_AT_MS: i64 = 1_767_225_600_000;
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// As entradas do cofre do vetor: (título, URL, utilizador, palavra-passe,
 /// notas). A segunda não tem título, para o vetor guardar um título preenchido
@@ -68,20 +72,26 @@ const UNKNOWN_ENTRY_FIELD: (&str, &[u8]) = ("colour", b"\xa2\x61b\x01\x61a\x02")
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (name, with_unknown_fields) = match args.as_slice() {
-        [name] => (name.clone(), false),
-        [name, flag] if flag == "--with-unknown-fields" => (name.clone(), true),
+    let flag = |wanted: &str| args.get(1).is_some_and(|flag| flag == wanted);
+    let with_unknown_fields = flag("--with-unknown-fields");
+    let with_trash_and_history = flag("--with-trash-and-history");
+    let name = match args.as_slice() {
+        [name] => name.clone(),
+        [name, _] if with_unknown_fields || with_trash_and_history => name.clone(),
         _ => {
             eprintln!(
-                "uso: generate_format_vector <nome> [--with-unknown-fields], p. ex. single-device"
+                "uso: generate_format_vector <nome> [--with-unknown-fields | --with-trash-and-history], p. ex. single-device"
             );
             return ExitCode::FAILURE;
         }
     };
     let write = |master_password: &str| {
-        let (folder, vault) = write_vault(master_password);
+        let (folder, clock, vault) = write_vault(master_password);
         if with_unknown_fields {
             add_unknown_fields(&folder, &vault, master_password);
+        }
+        if with_trash_and_history {
+            add_trash_and_history(&clock, &vault);
         }
         (folder, vault)
     };
@@ -118,8 +128,44 @@ fn main() -> ExitCode {
         dir.display()
     );
     let mut entries = String::new();
-    for entry in vault.list_entries().expect("listar as entradas") {
+    let listed = vault.list_entries().expect("listar as entradas");
+    let trashed = vault.list_trash().expect("listar o Lixo");
+    for entry in listed.into_iter().chain(trashed) {
         let reveal = |field| vault.reveal(&entry.id, field).expect("revelar");
+        let state = match entry.state {
+            EntryState::Active => "EntryState::Active".to_owned(),
+            EntryState::InTrash { trashed_at_ms } => {
+                format!("EntryState::InTrash {{ trashed_at_ms: {trashed_at_ms} }}")
+            }
+        };
+        let mut history = String::new();
+        for version in vault.entry_history(&entry.id).expect("ler o histórico") {
+            let reveal = |field| {
+                vault
+                    .reveal_version(&entry.id, &version.id, field)
+                    .expect("revelar uma versão")
+            };
+            history += &format!(
+                r#"
+                    ExpectedVersion {{
+                        title: {:?},
+                        url: {:?},
+                        username: {:?},
+                        password: {:?},
+                        notes: {:?},
+                        replaced_at_ms: {},
+                    }},"#,
+                version.title,
+                version.url,
+                version.username,
+                reveal(SecretField::Password),
+                reveal(SecretField::Notes),
+                version.replaced_at_ms,
+            );
+        }
+        if !history.is_empty() {
+            history += "\n                ";
+        }
         entries += &format!(
             r#"
             ExpectedEntry {{
@@ -129,6 +175,8 @@ fn main() -> ExitCode {
                 username: {:?},
                 password: {:?},
                 notes: {:?},
+                state: {state},
+                history: &[{history}],
             }},"#,
             entry.id,
             entry.title,
@@ -149,6 +197,7 @@ fn main() -> ExitCode {
         entries: &[{entries}
         ],
         unknown_fields: &[{unknown_fields}],
+        tombstones: &[{tombstones}],
     }},
 }},"#,
         vault_id = vault.vault_id(),
@@ -159,6 +208,10 @@ fn main() -> ExitCode {
                 .join(", ")
         } else {
             String::new()
+        },
+        tombstones = match with_trash_and_history {
+            true => format!("{:?}", tombstone_id(&folder, &vault, &master_password)),
+            false => String::new(),
         },
     );
     ExitCode::SUCCESS
@@ -219,6 +272,77 @@ fn add_unknown_fields(folder: &MemoryVaultFolder, vault: &Vault, master_password
         .expect("reescrever a réplica");
 }
 
+/// Acrescenta ao cofre, com o relógio a andar entre os passos: uma versão no
+/// histórico da entrada "GitHub" (palavra-passe mudada), uma entrada no Lixo e
+/// uma entrada apagada definitivamente, que fica só como lápide.
+fn add_trash_and_history(clock: &ManualClock, vault: &Vault) {
+    let github = vault
+        .list_entries()
+        .expect("listar as entradas")
+        .into_iter()
+        .find(|entry| entry.title == "GitHub")
+        .expect("a entrada GitHub");
+    clock.advance(DAY_MS);
+    let changes = EntryChanges {
+        password: Some("vetor: palavra-passe 1, nova".to_owned()),
+        ..EntryChanges::default()
+    };
+    vault.update_entry(&github.id, changes).expect("editar");
+
+    let in_trash = vault
+        .create_entry(fields([
+            "Antiga",
+            "https://antiga.pt",
+            "antigo",
+            "vetor: palavra-passe 3",
+            "vetor: notas 3",
+        ]))
+        .expect("criar uma entrada");
+    let deleted = vault
+        .create_entry(fields([
+            "Apagada",
+            "https://apagada.pt",
+            "apagado",
+            "vetor: palavra-passe 4",
+            "vetor: notas 4",
+        ]))
+        .expect("criar uma entrada");
+    clock.advance(DAY_MS);
+    vault.delete_entry(&in_trash).expect("enviar para o Lixo");
+    vault
+        .delete_entry_permanently(&deleted)
+        .expect("apagar definitivamente");
+}
+
+/// O id da única lápide do corpo da réplica: os 16 bytes a seguir à chave
+/// `id` do primeiro mapa depois de `tombstones`.
+fn tombstone_id(folder: &MemoryVaultFolder, vault: &Vault, master_password: &str) -> String {
+    let body = testing::open_replica(folder, &vault.device_id(), master_password)
+        .expect("decifrar a réplica")
+        .body;
+    let key = text("tombstones");
+    let at = body
+        .windows(key.len())
+        .position(|window| window == key)
+        .expect("a réplica tem lápides");
+    // Array de 1 elemento, mapa, chave "id", bytes de 16.
+    let prefix = [&[0x81, 0xa2][..], &text("id"), &[0x50]].concat();
+    let start = at + key.len();
+    assert_eq!(body[start..start + prefix.len()], prefix, "uma lápide");
+    let id = &body[start + prefix.len()..start + prefix.len() + 16];
+    id.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn fields([title, url, username, password, notes]: [&str; 5]) -> EntryFields {
+    EntryFields {
+        title: title.to_string(),
+        url: url.to_string(),
+        username: username.to_string(),
+        password: password.to_string(),
+        notes: notes.to_string(),
+    }
+}
+
 fn from_hex(hex: &str) -> Vec<u8> {
     (0..hex.len())
         .step_by(2)
@@ -230,27 +354,24 @@ fn escaped(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("\\x{byte:02x}")).collect()
 }
 
-/// Um cofre novo, escrito pela versão atual numa pasta do cofre em memória.
-fn write_vault(master_password: &str) -> (MemoryVaultFolder, Vault) {
+/// Um cofre novo, escrito pela versão atual numa pasta do cofre em memória,
+/// com o relógio que usa.
+fn write_vault(master_password: &str) -> (MemoryVaultFolder, ManualClock, Vault) {
     let folder = MemoryVaultFolder::new();
+    let clock = ManualClock::new(CREATED_AT_MS);
     let vault = Vault::create(
         Arc::new(folder.clone()),
-        Arc::new(ManualClock::new(CREATED_AT_MS)),
+        Arc::new(clock.clone()),
         master_password,
         KDF,
     )
     .expect("criar o cofre");
-    for [title, url, username, password, notes] in ENTRIES {
-        let fields = EntryFields {
-            title: title.to_string(),
-            url: url.to_string(),
-            username: username.to_string(),
-            password: password.to_string(),
-            notes: notes.to_string(),
-        };
-        vault.create_entry(fields).expect("criar uma entrada");
+    for entry in ENTRIES {
+        vault
+            .create_entry(fields(*entry))
+            .expect("criar uma entrada");
     }
-    (folder, vault)
+    (folder, clock, vault)
 }
 
 /// `v<principal>.<secundária>`, dos cabeçalhos do chaveiro e das réplicas

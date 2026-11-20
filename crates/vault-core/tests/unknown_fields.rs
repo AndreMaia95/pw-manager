@@ -4,7 +4,7 @@
 mod common;
 
 use common::cbor::{array, bytes, map, text, uint};
-use common::{PASSWORD, START_MS, TestEnv};
+use common::{PASSWORD, START_MS, TestEnv, from_hex};
 use vault_core::testing::{self, MemoryVaultFolder};
 use vault_core::{EntryChanges, SecretField, VaultError};
 
@@ -27,15 +27,25 @@ const UNKNOWN_ENTRY_VALUE: &[u8] = b"\xa2\x61b\x01\x61a\x02";
 /// origem do corpo (`created_at_ms`), depois os acrescentados, conhecidos ou
 /// não, pelos bytes da chave codificada (o comprimento vem primeiro).
 fn newer_body(title: &str) -> Vec<u8> {
-    let entry = map(&[
+    body_with_entry(title, None)
+}
+
+/// O corpo de [`newer_body`], com a entrada com o título `title` e, se dado, o
+/// histórico `history` (o array CBOR em bruto).
+fn body_with_entry(title: &str, history: Option<Vec<u8>>) -> Vec<u8> {
+    let mut fields = vec![
         ("id", bytes(&ENTRY_ID)),
         ("url", text("https://github.com/login")),
         ("notes", text("códigos na gaveta")),
         ("title", text(title)),
         ("colour", UNKNOWN_ENTRY_VALUE.to_vec()),
+    ];
+    fields.extend(history.map(|history| ("history", history)));
+    fields.extend([
         ("password", text("correto cavalo bateria")),
         ("username", text("andre")),
     ]);
+    let entry = map(&fields);
     map(&[
         ("created_at_ms", uint(START_MS as u64)),
         ("entries", array(&[entry])),
@@ -80,8 +90,23 @@ fn unknown_fields_from_a_newer_minor_version_survive_an_edit_byte_for_byte() {
     };
     vault.update_entry(ENTRY_ID_HEX, changes).unwrap();
 
+    // A edição guarda a versão anterior no histórico (ticket 07), só com os
+    // campos que esta versão conhece: o campo desconhecido fica na entrada.
+    let version_id = &vault.entry_history(ENTRY_ID_HEX).unwrap()[0].id;
+    let previous = map(&[
+        ("id", bytes(&from_hex(version_id))),
+        ("url", text("https://github.com/login")),
+        ("notes", text("códigos na gaveta")),
+        ("title", text("GitHub")),
+        ("password", text("correto cavalo bateria")),
+        ("username", text("andre")),
+        ("replaced_at_ms", uint(START_MS as u64)),
+    ]);
     let rewritten = testing::open_replica(&env.folder, &device_id, PASSWORD).unwrap();
-    assert_eq!(rewritten.body, newer_body("GitHub pessoal"));
+    assert_eq!(
+        rewritten.body,
+        body_with_entry("GitHub pessoal", Some(array(&[previous])))
+    );
     // Escreve sempre a versão do formato desta app (ADR-0008).
     assert_eq!(rewritten.header[4..8], our_header[4..8]);
 
@@ -132,4 +157,63 @@ fn an_unknown_field_whose_value_is_not_well_formed_cbor_is_rejected() {
         vault.unlock_with_master_password(PASSWORD),
         Err(VaultError::ReplicaRejected)
     );
+}
+
+/// Um corpo de uma versão secundária mais nova com uma entrada com histórico e
+/// uma lápide, cada uma com um campo desconhecido: `strength` na versão do
+/// histórico e `reason` na lápide.
+fn newer_body_with_history_and_tombstone() -> Vec<u8> {
+    let version = map(&[
+        ("id", bytes(&[0x11; 16])),
+        ("url", text("https://github.com/login")),
+        ("notes", text("notas antigas")),
+        ("title", text("GitHub")),
+        ("password", text("palavra-passe antiga")),
+        ("strength", UNKNOWN_ENTRY_VALUE.to_vec()),
+        ("username", text("andre")),
+        ("replaced_at_ms", uint(START_MS as u64)),
+    ]);
+    let entry = map(&[
+        ("id", bytes(&ENTRY_ID)),
+        ("url", text("https://github.com/login")),
+        ("notes", text("códigos na gaveta")),
+        ("title", text("GitHub")),
+        ("history", array(&[version])),
+        ("password", text("correto cavalo bateria")),
+        ("username", text("andre")),
+    ]);
+    let tombstone = map(&[
+        ("id", bytes(&[0x77; 16])),
+        ("reason", UNKNOWN_BODY_VALUE.to_vec()),
+        ("deleted_at_ms", uint(START_MS as u64)),
+    ]);
+    map(&[
+        ("created_at_ms", uint(START_MS as u64)),
+        ("entries", array(&[entry])),
+        ("tombstones", array(&[tombstone])),
+    ])
+}
+
+#[test]
+fn unknown_fields_in_a_history_version_and_a_tombstone_survive_a_rewrite_byte_for_byte() {
+    let env = TestEnv::new();
+    let device = env.device();
+    let device_id = device.create_vault(PASSWORD).device_id();
+    let body = newer_body_with_history_and_tombstone();
+    write_as_newer_minor_version(&env.folder, &device_id, body.clone());
+
+    let vault = device.open_vault(&device_id);
+    vault.unlock_with_master_password(PASSWORD).unwrap();
+    let history = vault.entry_history(ENTRY_ID_HEX).unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(
+        vault
+            .reveal_version(ENTRY_ID_HEX, &history[0].id, SecretField::Password)
+            .as_deref(),
+        Ok("palavra-passe antiga")
+    );
+    vault.save_replica().unwrap();
+
+    let rewritten = testing::open_replica(&env.folder, &device_id, PASSWORD).unwrap();
+    assert_eq!(rewritten.body, body);
 }

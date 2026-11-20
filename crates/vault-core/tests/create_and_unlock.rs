@@ -3,7 +3,7 @@ mod common;
 use common::{PASSWORD, START_MS, TestEnv};
 use std::sync::Arc;
 
-use vault_core::{Vault, VaultError};
+use vault_core::{SystemClock, Vault, VaultError};
 
 #[test]
 fn creating_a_vault_writes_a_keyring_and_this_devices_replica_to_the_vault_folder() {
@@ -120,7 +120,11 @@ fn a_keyring_with_bytes_after_its_body_is_rejected() {
     keyring.push(0x00);
     env.folder.put_keyring(keyring);
 
-    let vault = Vault::open(Arc::new(env.folder.clone()), &device_id);
+    let vault = Vault::open(
+        Arc::new(env.folder.clone()),
+        Arc::new(SystemClock),
+        &device_id,
+    );
 
     assert_eq!(vault.err(), Some(VaultError::KeyringRejected));
 }

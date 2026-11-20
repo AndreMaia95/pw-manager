@@ -9,9 +9,9 @@ mod common;
 
 use std::sync::Arc;
 
-use common::cbor::text;
-use common::{load_vector, vector_dirs, vectors_root};
-use vault_core::testing::{self, MemoryVaultFolder};
+use common::cbor::{bytes, text};
+use common::{from_hex, load_vector, vector_dirs, vectors_root};
+use vault_core::testing::{self, ManualClock, MemoryVaultFolder};
 use vault_core::{EntryChanges, EntryState, SecretField, Vault, VaultError};
 
 struct FormatVector {
@@ -26,12 +26,15 @@ struct ExpectedState {
     vault_id: &'static str,
     device_id: &'static str,
     created_at_ms: i64,
-    /// Pela ordem da listagem.
+    /// As entradas fora do Lixo, pela ordem da listagem, e depois as do Lixo,
+    /// pela ordem da listagem do Lixo.
     entries: &'static [ExpectedEntry],
     /// Campos desconhecidos (chave, valor CBOR em bruto) que têm de estar no
     /// corpo da réplica, e continuar lá sem alterações depois de esta versão a
     /// reescrever (ADR-0008).
     unknown_fields: &'static [(&'static str, &'static [u8])],
+    /// Ids de entradas que só existem como lápide.
+    tombstones: &'static [&'static str],
 }
 
 struct ExpectedEntry {
@@ -41,7 +44,22 @@ struct ExpectedEntry {
     username: &'static str,
     password: &'static str,
     notes: &'static str,
+    state: EntryState,
+    /// Da versão mais recente para a mais antiga.
+    history: &'static [ExpectedVersion],
 }
+
+struct ExpectedVersion {
+    title: &'static str,
+    url: &'static str,
+    username: &'static str,
+    password: &'static str,
+    notes: &'static str,
+    replaced_at_ms: i64,
+}
+
+/// 2026-01-01T00:00:00Z: o relógio com que o gerador escreve os vetores.
+const VECTORS_WRITTEN_AT_MS: i64 = 1_767_225_600_000;
 
 const VECTORS: &[FormatVector] = &[
     FormatVector {
@@ -53,6 +71,7 @@ const VECTORS: &[FormatVector] = &[
             created_at_ms: 1_767_225_600_000,
             entries: &[],
             unknown_fields: &[],
+            tombstones: &[],
         },
     },
     FormatVector {
@@ -70,6 +89,8 @@ const VECTORS: &[FormatVector] = &[
                     username: "utilizador@exemplo.pt",
                     password: "vetor: palavra-passe 2",
                     notes: "",
+                    state: EntryState::Active,
+                    history: &[],
                 },
                 ExpectedEntry {
                     id: "12f71dfa8150d3af15d3c239ec4cb9a6",
@@ -78,9 +99,12 @@ const VECTORS: &[FormatVector] = &[
                     username: "andre",
                     password: "vetor: palavra-passe 1",
                     notes: "vetor: notas 1",
+                    state: EntryState::Active,
+                    history: &[],
                 },
             ],
             unknown_fields: &[],
+            tombstones: &[],
         },
     },
     FormatVector {
@@ -98,6 +122,8 @@ const VECTORS: &[FormatVector] = &[
                     username: "utilizador@exemplo.pt",
                     password: "vetor: palavra-passe 2",
                     notes: "",
+                    state: EntryState::Active,
+                    history: &[],
                 },
                 ExpectedEntry {
                     id: "35f645c228d4e9497d42139284f7df7d",
@@ -106,12 +132,67 @@ const VECTORS: &[FormatVector] = &[
                     username: "andre",
                     password: "vetor: palavra-passe 1",
                     notes: "vetor: notas 1",
+                    state: EntryState::Active,
+                    history: &[],
                 },
             ],
             unknown_fields: &[
                 ("from_v1_1", b"\x9f\x18\x05\xf9\x3c\x00\xff"),
                 ("colour", b"\xa2\x61\x62\x01\x61\x61\x02"),
             ],
+            tombstones: &[],
+        },
+    },
+    FormatVector {
+        path: "v1.0/with-trash-and-history",
+        master_password: "vetor de teste v1.0",
+        expected: ExpectedState {
+            vault_id: "92600d7fa99172bb79788549d9c74f96",
+            device_id: "70dad2c3b7f06fee0b92ffc4154f8ed8",
+            created_at_ms: 1_767_225_600_000,
+            entries: &[
+                ExpectedEntry {
+                    id: "e988783ac2adfc0b3c2c2f7d738f6ce8",
+                    title: "exemplo.pt",
+                    url: "https://www.exemplo.pt/entrar",
+                    username: "utilizador@exemplo.pt",
+                    password: "vetor: palavra-passe 2",
+                    notes: "",
+                    state: EntryState::Active,
+                    history: &[],
+                },
+                ExpectedEntry {
+                    id: "41c6671cded4a02c697ec5a917b793fd",
+                    title: "GitHub",
+                    url: "https://github.com/login",
+                    username: "andre",
+                    password: "vetor: palavra-passe 1, nova",
+                    notes: "vetor: notas 1",
+                    state: EntryState::Active,
+                    history: &[ExpectedVersion {
+                        title: "GitHub",
+                        url: "https://github.com/login",
+                        username: "andre",
+                        password: "vetor: palavra-passe 1",
+                        notes: "vetor: notas 1",
+                        replaced_at_ms: 1_767_312_000_000,
+                    }],
+                },
+                ExpectedEntry {
+                    id: "ad72da3defae3cc588e061fbc28963db",
+                    title: "Antiga",
+                    url: "https://antiga.pt",
+                    username: "antigo",
+                    password: "vetor: palavra-passe 3",
+                    notes: "vetor: notas 3",
+                    state: EntryState::InTrash {
+                        trashed_at_ms: 1_767_398_400_000,
+                    },
+                    history: &[],
+                },
+            ],
+            unknown_fields: &[],
+            tombstones: &["c26f08d1eeb73e96d8c9bcc34f51156f"],
         },
     },
 ];
@@ -121,7 +202,7 @@ fn every_format_vector_opens_with_the_current_version_and_gives_the_expected_sta
     for vector in VECTORS {
         let path = vector.path;
         let expected = &vector.expected;
-        let vault = Vault::open(Arc::new(load(path)), expected.device_id)
+        let vault = open(&load(path), expected.device_id)
             .unwrap_or_else(|error| panic!("{path}: abrir o cofre: {error}"));
         assert_eq!(vault.vault_id(), expected.vault_id, "{path}: id do cofre");
         assert_eq!(
@@ -139,6 +220,13 @@ fn every_format_vector_opens_with_the_current_version_and_gives_the_expected_sta
             "{path}: data de criação"
         );
         assert_entries(&vault, expected.entries, path);
+        for id in expected.tombstones {
+            assert_eq!(
+                vault.reveal(id, SecretField::Password),
+                Err(VaultError::EntryNotFound),
+                "{path}: lápide {id}"
+            );
+        }
     }
 }
 
@@ -148,11 +236,15 @@ fn unknown_fields_in_every_format_vector_survive_a_rewrite_byte_for_byte() {
         let path = vector.path;
         let expected = &vector.expected;
         let folder = load(path);
-        assert_unknown_fields(&folder, vector, "como está no vetor");
+        assert_preserved(&folder, vector, "como está no vetor");
 
         let vault =
             unlock(&folder, vector).unwrap_or_else(|error| panic!("{path}: desbloquear: {error}"));
-        if let Some(entry) = expected.entries.first() {
+        let active = expected
+            .entries
+            .iter()
+            .find(|entry| entry.state == EntryState::Active);
+        if let Some(entry) = active {
             let changes = EntryChanges {
                 title: Some("editada por esta versão".to_owned()),
                 ..EntryChanges::default()
@@ -161,11 +253,12 @@ fn unknown_fields_in_every_format_vector_survive_a_rewrite_byte_for_byte() {
         } else {
             vault.save_replica().unwrap();
         }
-        assert_unknown_fields(&folder, vector, "depois de reescrita");
+        assert_preserved(&folder, vector, "depois de reescrita");
     }
 }
 
-fn assert_unknown_fields(folder: &MemoryVaultFolder, vector: &FormatVector, when: &str) {
+/// Os campos desconhecidos e as lápides do vetor estão no corpo da réplica.
+fn assert_preserved(folder: &MemoryVaultFolder, vector: &FormatVector, when: &str) {
     let path = vector.path;
     let device_id = vector.expected.device_id;
     let body = testing::open_replica(folder, device_id, vector.master_password)
@@ -178,12 +271,25 @@ fn assert_unknown_fields(folder: &MemoryVaultFolder, vector: &FormatVector, when
             "{path}: campo desconhecido {key:?} {when}"
         );
     }
+    for id in vector.expected.tombstones {
+        let tombstone_id = bytes(&from_hex(id));
+        assert!(
+            body.windows(tombstone_id.len())
+                .any(|window| window == tombstone_id),
+            "{path}: lápide {id} {when}"
+        );
+    }
 }
 
 fn assert_entries(vault: &Vault, expected: &[ExpectedEntry], path: &str) {
-    let entries = vault
+    let mut entries = vault
         .list_entries()
         .unwrap_or_else(|error| panic!("{path}: listar as entradas: {error}"));
+    entries.extend(
+        vault
+            .list_trash()
+            .unwrap_or_else(|error| panic!("{path}: listar o Lixo: {error}")),
+    );
     assert_eq!(entries.len(), expected.len(), "{path}: número de entradas");
     for (entry, expected) in entries.iter().zip(expected) {
         let id = expected.id;
@@ -194,7 +300,7 @@ fn assert_entries(vault: &Vault, expected: &[ExpectedEntry], path: &str) {
             entry.username, expected.username,
             "{path}: utilizador de {id}"
         );
-        assert_eq!(entry.state, EntryState::Active, "{path}: estado de {id}");
+        assert_eq!(entry.state, expected.state, "{path}: estado de {id}");
         assert_eq!(
             vault.reveal(id, SecretField::Password).as_deref(),
             Ok(expected.password),
@@ -204,6 +310,35 @@ fn assert_entries(vault: &Vault, expected: &[ExpectedEntry], path: &str) {
             vault.reveal(id, SecretField::Notes).as_deref(),
             Ok(expected.notes),
             "{path}: notas de {id}"
+        );
+        assert_history(vault, id, expected.history, path);
+    }
+}
+
+fn assert_history(vault: &Vault, id: &str, expected: &[ExpectedVersion], path: &str) {
+    let history = vault
+        .entry_history(id)
+        .unwrap_or_else(|error| panic!("{path}: histórico de {id}: {error}"));
+    assert_eq!(history.len(), expected.len(), "{path}: versões de {id}");
+    for (n, (version, expected)) in history.iter().zip(expected).enumerate() {
+        let what = format!("{path}: versão {n} de {id}");
+        assert_eq!(version.title, expected.title, "{what}: título");
+        assert_eq!(version.url, expected.url, "{what}: URL");
+        assert_eq!(version.username, expected.username, "{what}: utilizador");
+        assert_eq!(
+            version.replaced_at_ms, expected.replaced_at_ms,
+            "{what}: data"
+        );
+        let reveal = |field| vault.reveal_version(id, &version.id, field);
+        assert_eq!(
+            reveal(SecretField::Password).as_deref(),
+            Ok(expected.password),
+            "{what}: palavra-passe"
+        );
+        assert_eq!(
+            reveal(SecretField::Notes).as_deref(),
+            Ok(expected.notes),
+            "{what}: notas"
         );
     }
 }
@@ -264,12 +399,22 @@ fn a_format_vector_with_any_bit_flipped_fails_to_unlock() {
     }
 }
 
+/// Abre o cofre do vetor com o relógio parado na data em que foi escrito, para
+/// o Lixo do vetor não expirar com o tempo.
+fn open(folder: &MemoryVaultFolder, device_id: &str) -> Result<Vault, VaultError> {
+    Vault::open(
+        Arc::new(folder.clone()),
+        Arc::new(ManualClock::new(VECTORS_WRITTEN_AT_MS)),
+        device_id,
+    )
+}
+
 fn load(path: &str) -> MemoryVaultFolder {
     load_vector(&vectors_root().join(path))
 }
 
 fn unlock(folder: &MemoryVaultFolder, vector: &FormatVector) -> Result<Vault, VaultError> {
-    let vault = Vault::open(Arc::new(folder.clone()), vector.expected.device_id)?;
+    let vault = open(folder, vector.expected.device_id)?;
     vault.unlock_with_master_password(vector.master_password)?;
     Ok(vault)
 }

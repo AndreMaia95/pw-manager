@@ -34,6 +34,41 @@ fn replica_body_with_entries_seed() -> Vec<u8> {
     ])
 }
 
+/// Um corpo com uma entrada no Lixo com uma versão no histórico, e uma lápide,
+/// cada um com um campo desconhecido, pela ordem canónica (ADR-0008).
+fn replica_body_with_trash_and_history_seed() -> Vec<u8> {
+    let version = map(&[
+        ("id", bytes(&[0x11; 16])),
+        ("url", text("https://a.pt")),
+        ("notes", text("n0")),
+        ("title", text("a.pt")),
+        ("colour", b"\x01".to_vec()),
+        ("password", text("p0")),
+        ("username", text("u")),
+        ("replaced_at_ms", uint(1)),
+    ]);
+    let entry = map(&[
+        ("id", bytes(&[0x5a; 16])),
+        ("url", text("https://a.pt")),
+        ("notes", text("n")),
+        ("title", text("a.pt")),
+        ("history", array(&[version])),
+        ("password", text("p")),
+        ("username", text("u")),
+        ("trashed_at_ms", uint(2)),
+    ]);
+    let tombstone = map(&[
+        ("id", bytes(&[0x77; 16])),
+        ("colour", b"\x02".to_vec()),
+        ("deleted_at_ms", uint(3)),
+    ]);
+    map(&[
+        ("created_at_ms", uint(0)),
+        ("entries", array(&[entry])),
+        ("tombstones", array(&[tombstone])),
+    ])
+}
+
 #[test]
 fn the_keyring_reader_survives_every_vector_and_its_mutations() {
     for keyring in vector_files("keyring") {
@@ -56,6 +91,16 @@ fn the_replica_body_decoder_survives_a_valid_body_and_its_mutations() {
 #[test]
 fn the_replica_body_decoder_survives_a_body_with_entries_and_its_mutations() {
     for_each_mutation(&replica_body_with_entries_seed(), fuzzing::replica_body);
+}
+
+#[test]
+fn the_replica_body_decoder_survives_a_body_with_trash_and_history_and_its_mutations() {
+    let seed = replica_body_with_trash_and_history_seed();
+    assert!(
+        fuzzing::replica_body_is_accepted(&seed),
+        "a semente é válida"
+    );
+    for_each_mutation(&seed, fuzzing::replica_body);
 }
 
 #[test]

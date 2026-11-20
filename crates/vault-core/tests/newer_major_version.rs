@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use common::{PASSWORD, TestEnv};
 use vault_core::testing;
-use vault_core::{Vault, VaultError};
+use vault_core::{SystemClock, Vault, VaultError};
 
 #[test]
 fn a_replica_from_a_newer_major_version_asks_for_an_update_and_is_never_written() {
@@ -42,7 +42,11 @@ fn a_keyring_from_a_newer_major_version_asks_for_an_update() {
     keyring.truncate(8);
     env.folder.put_keyring(keyring);
 
-    let vault = Vault::open(Arc::new(env.folder.clone()), &device_id);
+    let vault = Vault::open(
+        Arc::new(env.folder.clone()),
+        Arc::new(SystemClock),
+        &device_id,
+    );
 
     assert_eq!(vault.err(), Some(VaultError::UpdateRequired));
 }

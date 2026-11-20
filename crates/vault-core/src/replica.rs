@@ -10,9 +10,11 @@
 //! ```
 //!
 //! O corpo é um mapa (ADR-0008). Nasceu na versão 1.0 com `created_at_ms`;
-//! `entries` foi acrescentado depois e só é escrito quando há entradas. É um
-//! array com o mapa de cada entrada, ordenado pelos bytes do id da entrada.
-//! Campos desconhecidos, no corpo e em cada entrada, são preservados.
+//! `entries` e `tombstones` foram acrescentados depois e só são escritos
+//! quando não estão vazios. Cada um é um array de mapas, ordenado pelos bytes
+//! do id da entrada; um id não pode estar nos dois. Campos desconhecidos, no
+//! corpo, em cada entrada, em cada versão do histórico e em cada lápide, são
+//! preservados.
 
 use std::collections::BTreeMap;
 
@@ -24,6 +26,7 @@ use crate::crypto::{self, NONCE_LEN, SecretKey};
 use crate::entry::{Entry, EntryId};
 use crate::format_version;
 use crate::ids::{DeviceId, ID_LEN, Id, VaultId};
+use crate::trash::Tombstone;
 
 const MAGIC: [u8; 4] = *b"PWMR";
 const FORMAT_MAJOR: u16 = 1;
@@ -38,6 +41,7 @@ pub(crate) const NONCE_OFFSET: usize = HEADER_LEN - NONCE_LEN;
 pub(crate) struct ReplicaBody {
     pub(crate) created_at_ms: i64,
     pub(crate) entries: BTreeMap<EntryId, Entry>,
+    pub(crate) tombstones: BTreeMap<EntryId, Tombstone>,
     /// Campos escritos por uma versão mais nova, preservados (ADR-0008).
     pub(crate) unknown: UnknownFields,
 }
@@ -98,6 +102,10 @@ pub(crate) fn encode_body(body: &ReplicaBody) -> Zeroizing<Vec<u8>> {
         let entries = body.entries.values().map(Entry::encode).collect();
         map.added_item("entries", cbor::encode_array(entries));
     }
+    if !body.tombstones.is_empty() {
+        let tombstones = body.tombstones.values().map(Tombstone::encode).collect();
+        map.added_item("tombstones", cbor::encode_array(tombstones));
+    }
     map.unknown(&body.unknown);
     map.finish()
 }
@@ -106,7 +114,7 @@ pub(crate) fn encode_body(body: &ReplicaBody) -> Zeroizing<Vec<u8>> {
 pub(crate) fn decode_body(plaintext: &[u8]) -> Result<ReplicaBody, VaultError> {
     let body = parse_body(plaintext).ok_or(VaultError::ReplicaRejected)?;
     // Apanha tudo o que a leitura campo a campo deixa passar: outra ordem dos
-    // campos ou das entradas, ids repetidos, `entries` vazio, formas mais
+    // campos, das entradas ou das lápides, ids repetidos, arrays vazios, formas mais
     // longas do que a mais curta.
     if *encode_body(&body) != *plaintext {
         return Err(VaultError::ReplicaRejected);
@@ -124,9 +132,21 @@ fn parse_body(plaintext: &[u8]) -> Option<ReplicaBody> {
             entries.insert(entry.id, entry);
         }
     }
+    let mut tombstones = BTreeMap::new();
+    if let Some(items) = map.take("tombstones") {
+        for item in cbor::split_array(items)? {
+            let tombstone = Tombstone::decode(item)?;
+            // Uma entrada apagada não pode continuar a existir.
+            if entries.contains_key(&tombstone.id) {
+                return None;
+            }
+            tombstones.insert(tombstone.id, tombstone);
+        }
+    }
     Some(ReplicaBody {
         created_at_ms,
         entries,
+        tombstones,
         unknown: map.into_unknown(),
     })
 }

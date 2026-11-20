@@ -14,10 +14,10 @@ O código é escrito em inglês. A coluna **Em código** dá o identificador que
 | **Revelar** | Pedir explicitamente um campo secreto (palavra-passe ou notas) de uma entrada; é a única forma de um segredo sair do vault-core. | `reveal` | mostrar, desencriptar |
 | **Campo secreto** | Um campo de uma entrada que só sai do vault-core quando revelado: a palavra-passe e as notas. | `SecretField` | campo privado, campo sensível |
 | **Campo desconhecido** | Um campo da réplica escrito por uma versão mais nova da app, que esta versão não conhece mas guarda e reescreve sem alterações. | `UnknownFields` | campo extra, campo inválido |
-| **Histórico da entrada** | As últimas versões anteriores de uma entrada, incluindo versões perdidas numa fusão. | `EntryHistory` | versões, revisões |
+| **Histórico da entrada** | As últimas 10 versões anteriores de uma entrada, incluindo versões perdidas numa fusão. Restaurar uma versão grava-a como edição nova. | `entry_history`; cada versão é uma `HistoryVersion` | versões, revisões |
 | **Entrada exposta** | Uma entrada cujo segredo pode ter sido lido por terceiros e que ainda tem de ser alterado no próprio site. | `exposed` (estado de `Entry`) | entrada comprometida, entrada a alterar |
-| **Lixo** | Onde fica uma entrada apagada durante 30 dias, ainda recuperável, antes de se tornar lápide. | `Trash` | reciclagem, apagadas |
-| **Lápide** | O que resta de uma entrada apagada definitivamente: a prova de que foi apagada e quando, sem nenhum dos seus dados. | `Tombstone` | marca de apagada, tombstone |
+| **Lixo** | Onde fica uma entrada apagada durante 30 dias, ainda recuperável, antes de se tornar lápide. | `EntryState::InTrash`, `list_trash` | reciclagem, apagadas |
+| **Lápide** | O que resta de uma entrada apagada definitivamente, ou que esteve 30 dias no Lixo: a prova de que foi apagada e quando, sem nenhum dos seus dados. | `Tombstone` | marca de apagada, tombstone |
 
 ## Sincronização
 

@@ -71,8 +71,21 @@ impl TestDevice {
     /// Abre (bloqueado) um cofre existente como o dispositivo `device_id`,
     /// como acontece quando a app volta a arrancar.
     pub fn open_vault(&self, device_id: &str) -> Vault {
-        Vault::open(Arc::new(self.folder.clone()), device_id).expect("abrir o cofre")
+        Vault::open(
+            Arc::new(self.folder.clone()),
+            Arc::new(self.clock.clone()),
+            device_id,
+        )
+        .expect("abrir o cofre")
     }
+}
+
+/// Os bytes de um id em hexadecimal.
+pub fn from_hex(hex: &str) -> Vec<u8> {
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+        .collect()
 }
 
 /// A pasta dos vetores de teste do formato (ver `tests/vectors/README.md`).

@@ -20,10 +20,11 @@ mod search;
 mod storage;
 #[cfg(feature = "testing")]
 pub mod testing;
+mod trash;
 mod vault;
 
 pub use clock::{Clock, SystemClock};
-pub use entry::{EntryChanges, EntryFields, EntryState, EntrySummary, SecretField};
+pub use entry::{EntryChanges, EntryFields, EntryState, EntrySummary, HistoryVersion, SecretField};
 pub use error::{StorageError, VaultError};
 pub use kdf::KdfParams;
 pub use storage::Storage;

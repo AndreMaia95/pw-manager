@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::VaultError;
-use crate::crypto;
+use crate::{cbor, crypto};
 
 pub(crate) const ID_LEN: usize = 16;
 
@@ -12,6 +12,12 @@ pub(crate) struct Id(pub(crate) [u8; ID_LEN]);
 impl Id {
     pub(crate) fn random() -> Result<Self, VaultError> {
         crypto::random_bytes().map(Id)
+    }
+
+    /// Um id numa string de bytes CBOR, como vem num mapa da réplica.
+    pub(crate) fn decode_cbor(item: &[u8]) -> Option<Self> {
+        let id: serde_bytes::ByteBuf = cbor::decode_value(item)?;
+        Some(Id(id.as_slice().try_into().ok()?))
     }
 
     pub(crate) fn from_hex(text: &str) -> Option<Self> {

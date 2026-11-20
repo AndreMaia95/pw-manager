@@ -50,6 +50,10 @@ dados que os vetores existentes ainda não cobrem (entradas, histórico, lápide
    com um campo desconhecido no corpo e outro numa entrada (ADR-0008). Os campos
    que o vetor tem de preservar vão para `unknown_fields` em `ExpectedState`.
 
+   Com `--with-trash-and-history` no fim, o cofre do vetor leva também uma
+   versão no histórico da entrada "GitHub", uma entrada no Lixo e uma lápide.
+   O id da lápide vai para `tombstones` em `ExpectedState`.
+
    O gerador lê a versão do formato dos bytes que escreveu e põe o vetor em
    `v<principal>.<secundária>/<nome>/`. Recusa-se a escrever sobre uma pasta que
    já existe, e desiste se o chaveiro e a réplica tiverem versões diferentes (nesse
