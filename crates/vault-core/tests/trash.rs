@@ -388,3 +388,29 @@ fn a_replica_with_an_entry_that_is_also_a_tombstone_is_rejected() {
         Err(VaultError::ReplicaRejected)
     );
 }
+
+#[test]
+fn an_expired_entry_leaves_the_replica_at_the_next_write_if_the_unlock_rewrite_fails() {
+    let (device, vault) = new_vault();
+    let banco = banco_with_history(&vault);
+    vault.delete_entry(&banco).unwrap();
+    vault.lock();
+    device.clock.advance(31 * DAY_MS);
+
+    // A pasta lê-se mas não aceita escritas: a reescrita do desbloqueio falha.
+    device.folder.set_writable(false);
+    assert_eq!(vault.unlock_with_master_password(PASSWORD), Ok(()));
+    assert_gone(&vault, &banco);
+    let body = replica_body(&device, &vault);
+    assert!(contains(&body, b"palavra-passe de Banco"));
+
+    device.folder.set_writable(true);
+    vault.create_entry(entry("Correio")).unwrap();
+
+    let body = replica_body(&device, &vault);
+    assert_nothing_of_banco_in(&body);
+    assert!(contains(
+        &body,
+        &tombstones(&[(&banco, START_MS + 30 * DAY_MS)])
+    ));
+}

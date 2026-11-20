@@ -27,6 +27,7 @@ struct Files {
     keyring: Option<Vec<u8>>,
     replicas: BTreeMap<String, Vec<u8>>,
     unavailable: bool,
+    read_only: bool,
 }
 
 impl MemoryVaultFolder {
@@ -65,10 +66,26 @@ impl MemoryVaultFolder {
         self.files().unavailable = !available;
     }
 
-    /// A pasta, para ler ou escrever pela interface [`Storage`].
+    /// Com `false`, a pasta continua a ler-se, mas as escritas pela interface
+    /// [`Storage`] falham com [`StorageError::Unavailable`] e nada muda. Simula
+    /// uma escrita que falha a meio de uma operação que já leu.
+    pub fn set_writable(&self, writable: bool) {
+        self.files().read_only = !writable;
+    }
+
+    /// A pasta, para ler pela interface [`Storage`].
     fn available_files(&self) -> Result<MutexGuard<'_, Files>, StorageError> {
         let files = self.files();
         if files.unavailable {
+            return Err(StorageError::Unavailable);
+        }
+        Ok(files)
+    }
+
+    /// A pasta, para escrever pela interface [`Storage`].
+    fn writable_files(&self) -> Result<MutexGuard<'_, Files>, StorageError> {
+        let files = self.available_files()?;
+        if files.read_only {
             return Err(StorageError::Unavailable);
         }
         Ok(files)
@@ -87,7 +104,7 @@ impl Storage for MemoryVaultFolder {
     }
 
     fn write_keyring(&self, bytes: Vec<u8>) -> Result<(), StorageError> {
-        self.available_files()?.keyring = Some(bytes);
+        self.writable_files()?.keyring = Some(bytes);
         Ok(())
     }
 
@@ -96,7 +113,7 @@ impl Storage for MemoryVaultFolder {
     }
 
     fn write_replica(&self, device_id: String, bytes: Vec<u8>) -> Result<(), StorageError> {
-        self.available_files()?.replicas.insert(device_id, bytes);
+        self.writable_files()?.replicas.insert(device_id, bytes);
         Ok(())
     }
 }

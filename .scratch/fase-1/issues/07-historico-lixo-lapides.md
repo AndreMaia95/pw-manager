@@ -52,3 +52,5 @@
 - Fuzzing curto (cerca de 45 s em `replica_body` e em `replica`, com o vetor novo no corpus) sem falhas.
 - Para o ticket 09: o carimbo do relógio lógico híbrido ainda não existe. `replaced_at_ms` e `deleted_at_ms` usam a hora de parede. A versão perdida numa fusão entra no histórico por `Entry::set_fields` ou por um caminho equivalente.
 
+**Acrescento (2026-11-20).** A `MemoryVaultFolder` ganhou `set_writable(false)`: a pasta continua a ler-se, mas as escritas falham com `StorageError::Unavailable` e nada muda. Teste em `an_expired_entry_leaves_the_replica_at_the_next_write_if_the_unlock_rewrite_fails` (`tests/trash.rs`): com a escrita a falhar, o desbloqueio continua e a entrada expirada já não aparece, mas a réplica no disco ainda a tem; a escrita seguinte tira-a de lá e deixa a lápide com a data de entrada no Lixo mais 30 dias. O próprio duplo é testado em `tests/test_env.rs`.
+

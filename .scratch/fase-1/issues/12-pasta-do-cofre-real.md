@@ -12,3 +12,7 @@
 - [ ] Quando a pasta volta, a réplica local é escrita e as outras são fundidas
 - [ ] O núcleo expõe o estado da sincronização (última sincronização, pasta indisponível)
 - [ ] Testes contra uma pasta temporária real; cenários de indisponibilidade também com o armazenamento em memória
+
+## Comments
+
+**Nota do ticket 07 (2026-11-20).** A `MemoryVaultFolder` já simula uma pasta que se lê mas não aceita escritas (`set_writable(false)`), além da pasta indisponível (`set_available(false)`). Serve para os testes deste ticket.
