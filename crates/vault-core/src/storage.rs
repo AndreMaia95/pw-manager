@@ -16,6 +16,9 @@ pub trait Storage: Send + Sync {
     /// A réplica do dispositivo `device_id`, ou `None` se não existe.
     fn read_replica(&self, device_id: String) -> Result<Option<Vec<u8>>, StorageError>;
     fn write_replica(&self, device_id: String, bytes: Vec<u8>) -> Result<(), StorageError>;
+    /// Apaga a réplica do dispositivo `device_id`, se existir: a de um
+    /// dispositivo removido ou recusado (ticket 11).
+    fn delete_replica(&self, device_id: String) -> Result<(), StorageError>;
 }
 
 /// Acesso à pasta local deste dispositivo, fora da pasta do cofre, injetado no

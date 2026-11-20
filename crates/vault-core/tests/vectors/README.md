@@ -84,6 +84,16 @@ dados que os vetores existentes ainda não cobrem (entradas, histórico, lápide
    leva as três réplicas e as três chaves; o id do removido vai para
    `removed_devices` em `ExpectedState`.
 
+   Com `--with-devices` no fim, o primeiro dispositivo dá-se um nome; um
+   segundo junta-se, dá-se um nome e é aceite pelo primeiro uma hora depois;
+   um terceiro junta-se, dá-se um nome e fica pendente. O vetor descreve o
+   primeiro (o vetor `v1.2/with-devices`); os dispositivos com nome vão para `known_devices` e o pendente
+   para `pending_devices` em `ExpectedState`.
+
+   Desde o ticket 11, os dispositivos que se juntam nos outros cenários são
+   aceites pelo primeiro antes de as réplicas se fundirem: os vetores
+   anteriores foram escritos quando um dispositivo entrava sem ser aceite.
+
    O gerador lê a versão do formato dos bytes que escreveu e põe o vetor em
    `v<principal>.<secundária>/<nome>/`, com a versão secundária mais alta entre
    o chaveiro e as réplicas (evoluem em separado: desde a 1.2 do chaveiro, as

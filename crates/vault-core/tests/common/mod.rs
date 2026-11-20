@@ -79,6 +79,16 @@ impl TestDevice {
         self.try_join_vault(password).expect("juntar-se ao cofre")
     }
 
+    /// Junta este dispositivo ao cofre, como [`TestDevice::join_vault`], e
+    /// aceita-o em `accepter`, um dispositivo conhecido, que confirma a
+    /// impressão digital que este mostra. Este só se sabe aceite depois de
+    /// fundir.
+    pub fn join_vault_accepted_by(&self, password: &str, accepter: &Vault) -> Vault {
+        let vault = self.join_vault(password);
+        accept(accepter, &vault);
+        vault
+    }
+
     pub fn try_join_vault(&self, password: &str) -> Result<Vault, VaultError> {
         Vault::join(
             Arc::new(self.folder.clone()),
@@ -100,6 +110,15 @@ impl TestDevice {
         )
         .expect("abrir o cofre")
     }
+}
+
+/// Aceita o dispositivo pendente `pending` em `accepter`, com a impressão
+/// digital que `pending` mostra.
+pub fn accept(accepter: &Vault, pending: &Vault) {
+    let fingerprint = pending.device_fingerprint().expect("impressão digital");
+    accepter
+        .accept_device(&pending.device_id(), &fingerprint)
+        .expect("aceitar o dispositivo");
 }
 
 /// Um carimbo (ADR-0003) como item CBOR: bytes com a data i64 BE, o contador

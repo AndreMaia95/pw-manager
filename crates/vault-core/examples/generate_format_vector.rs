@@ -1,8 +1,16 @@
 //! Gera um vetor de teste do formato com a versão atual (ADR-0016).
 //!
 //! ```text
-//! cargo run -p vault-core --example generate_format_vector -- <nome> [--with-unknown-fields | --with-trash-and-history | --with-generator-settings | --with-two-devices | --with-removed-device | --with-removed-signer]
+//! cargo run -p vault-core --example generate_format_vector -- <nome> [--with-unknown-fields | --with-trash-and-history | --with-generator-settings | --with-two-devices | --with-removed-device | --with-removed-signer | --with-devices]
 //! ```
+//!
+//! Com `--with-devices`, o primeiro dispositivo dá-se um nome; um segundo
+//! junta-se, dá-se um nome e é aceite pelo primeiro uma hora depois; um
+//! terceiro junta-se, dá-se um nome e fica pendente. O vetor descreve o
+//! primeiro, e a pasta leva as três réplicas (ticket 11).
+//!
+//! Desde o ticket 11, cada dispositivo que se junta nos outros cenários é
+//! aceite pelo primeiro antes de as réplicas se fundirem.
 //!
 //! Com `--with-removed-signer`, mais dois dispositivos juntam-se ao cofre; o
 //! segundo funde e remove o primeiro, que tinha escrito e assinado o
@@ -102,6 +110,7 @@ fn main() -> ExitCode {
     let with_two_devices = flag("--with-two-devices");
     let with_removed_device = flag("--with-removed-device");
     let with_removed_signer = flag("--with-removed-signer");
+    let with_devices = flag("--with-devices");
     let name = match args.as_slice() {
         [name] => name.clone(),
         [name, _]
@@ -110,13 +119,14 @@ fn main() -> ExitCode {
                 || with_generator_settings
                 || with_two_devices
                 || with_removed_device
-                || with_removed_signer =>
+                || with_removed_signer
+                || with_devices =>
         {
             name.clone()
         }
         _ => {
             eprintln!(
-                "uso: generate_format_vector <nome> [--with-unknown-fields | --with-trash-and-history | --with-generator-settings | --with-two-devices | --with-removed-device | --with-removed-signer], p. ex. single-device"
+                "uso: generate_format_vector <nome> [--with-unknown-fields | --with-trash-and-history | --with-generator-settings | --with-two-devices | --with-removed-device | --with-removed-signer | --with-devices], p. ex. single-device"
             );
             return ExitCode::FAILURE;
         }
@@ -152,6 +162,9 @@ fn main() -> ExitCode {
             locals.extend(others);
             removed.push(removed_id);
             vault = second;
+        }
+        if with_devices {
+            locals.extend(add_devices(&folder, &clock, &vault, master_password));
         }
         (folder, locals, vault, deleted, removed)
     };
@@ -281,6 +294,8 @@ fn main() -> ExitCode {
         unknown_fields: &[{unknown_fields}],
         tombstones: &[{tombstones}],
         removed_devices: &[{removed_devices}],
+        known_devices: &[{known_devices}],
+        pending_devices: &[{pending_devices}],
     }},
 }},"#,
         vault_id = vault.vault_id(),
@@ -300,6 +315,33 @@ fn main() -> ExitCode {
         removed_devices = removed
             .iter()
             .map(|id| format!("{id:?}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        known_devices = if with_devices {
+            let known = vault.known_devices().expect("listar os dispositivos");
+            known
+                .iter()
+                .map(|device| {
+                    format!(
+                        r#"
+            ExpectedDevice {{
+                id: "{}",
+                name: {:?},
+                accepted_at_ms: {:?},
+            }},"#,
+                        device.device_id, device.name, device.accepted_at_ms
+                    )
+                })
+                .collect::<String>()
+                + "\n        "
+        } else {
+            String::new()
+        },
+        pending_devices = vault
+            .pending_devices()
+            .expect("listar os pendentes")
+            .iter()
+            .map(|device| format!("({:?}, {:?})", device.device_id, device.name))
             .collect::<Vec<_>>()
             .join(", "),
     );
@@ -431,6 +473,7 @@ fn add_second_device(
         master_password,
     )
     .expect("juntar o segundo dispositivo");
+    accept(vault, &second);
     let entries = vault.list_entries().expect("listar as entradas");
     let github = entries.iter().find(|entry| entry.title == "GitHub");
     let github = &github.expect("a entrada GitHub").id;
@@ -502,6 +545,8 @@ fn add_removed_device(
     };
     let (second, second_local) = join();
     let (third, third_local) = join();
+    accept(vault, &second);
+    accept(vault, &third);
     vault.merge().expect("fundir no primeiro");
     vault
         .remove_device(&third.device_id())
@@ -540,6 +585,8 @@ fn add_removed_signer(
     };
     let (second, second_local) = join();
     let (third, third_local) = join();
+    accept(vault, &second);
+    accept(vault, &third);
     second.merge().expect("fundir no segundo");
     second
         .remove_device(&vault.device_id())
@@ -550,6 +597,54 @@ fn add_removed_signer(
         (third.device_id(), third_local),
     ];
     (second, locals, vault.device_id())
+}
+
+/// Aceita o dispositivo pendente `pending` em `accepter`, com a impressão
+/// digital que `pending` mostra.
+fn accept(accepter: &Vault, pending: &Vault) {
+    let fingerprint = pending.device_fingerprint().expect("impressão digital");
+    accepter
+        .accept_device(&pending.device_id(), &fingerprint)
+        .expect("aceitar o dispositivo");
+}
+
+/// O primeiro dispositivo, `vault`, dá-se um nome. Um segundo junta-se,
+/// dá-se um nome e é aceite pelo primeiro uma hora depois; um terceiro
+/// junta-se e dá-se um nome, e fica pendente. Os dois primeiros fundem.
+/// Devolve o id e a pasta local do segundo e do terceiro.
+fn add_devices(
+    folder: &MemoryVaultFolder,
+    clock: &ManualClock,
+    vault: &Vault,
+    master_password: &str,
+) -> Vec<(String, MemoryLocalFolder)> {
+    let join = |name: &str| {
+        let local = MemoryLocalFolder::new();
+        let joined = Vault::join(
+            Arc::new(folder.clone()),
+            Arc::new(local.clone()),
+            Arc::new(ManualClock::new(CREATED_AT_MS)),
+            master_password,
+        )
+        .expect("juntar um dispositivo");
+        joined
+            .set_device_name(&joined.device_id(), name)
+            .expect("dar nome ao dispositivo");
+        (joined, local)
+    };
+    vault
+        .set_device_name(&vault.device_id(), "Secretária")
+        .expect("dar nome ao primeiro");
+    let (second, second_local) = join("Portátil");
+    let (third, third_local) = join("Computador da sala");
+    clock.advance(60 * 60 * 1000);
+    accept(vault, &second);
+    vault.merge().expect("fundir no primeiro");
+    second.merge().expect("fundir no segundo");
+    vec![
+        (second.device_id(), second_local),
+        (third.device_id(), third_local),
+    ]
 }
 
 /// Gera a palavra-passe da entrada "GitHub" com ajustes próprios (sem

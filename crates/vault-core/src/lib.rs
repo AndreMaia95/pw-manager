@@ -29,6 +29,7 @@ mod trash;
 mod vault;
 
 pub use clock::{Clock, SystemClock};
+pub use devices::{DeviceStatus, KnownDeviceSummary, PendingDeviceSummary};
 pub use entry::{EntryChanges, EntryFields, EntryState, EntrySummary, HistoryVersion, SecretField};
 pub use error::{StorageError, VaultError};
 pub use generator::{GeneratorSettings, PassphraseSeparator};

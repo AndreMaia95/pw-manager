@@ -1,8 +1,9 @@
 //! Carimbo do relógio lógico híbrido (ADR-0003).
 //!
-//! Cada versão de uma entrada e cada lápide leva o carimbo da alteração que a
-//! criou: data (ms do relógio de parede), contador e id do dispositivo. A ordem
-//! é essa: primeiro a data, depois o contador, e o id do dispositivo desempata.
+//! Cada versão de uma entrada, cada lápide e cada nome de um dispositivo
+//! conhecido leva o carimbo da alteração que o criou: data (ms do relógio de
+//! parede), contador e id do dispositivo. A ordem é essa: primeiro a data,
+//! depois o contador, e o id do dispositivo desempata.
 //!
 //! O carimbo seguinte de um dispositivo é sempre maior do que todos os que ele
 //! conhece, os seus e os que recebeu na fusão: se o relógio de parede estiver
@@ -164,8 +165,10 @@ impl ReplicaBody {
     pub(crate) fn devices_with_clock_ahead(&self, now_ms: i64) -> BTreeSet<DeviceId> {
         let entries = self.entries.values().flat_map(|entry| entry.stamps());
         let tombstones = self.tombstones.values().map(|tombstone| tombstone.stamp);
+        let names = self.devices.values().map(|device| device.name_stamp);
         entries
             .chain(tombstones)
+            .chain(names)
             .filter_map(|stamp| stamp.device_with_clock_ahead(now_ms))
             .collect()
     }
@@ -175,7 +178,8 @@ impl ReplicaBody {
     pub(crate) fn next_stamp(&self, now_ms: i64, device: DeviceId) -> Stamp {
         let entries = self.entries.values().map(|entry| entry.stamp);
         let tombstones = self.tombstones.values().map(|tombstone| tombstone.stamp);
-        let latest = entries.chain(tombstones).max();
+        let names = self.devices.values().map(|device| device.name_stamp);
+        let latest = entries.chain(tombstones).chain(names).max();
         Stamp::next(latest.unwrap_or(Stamp::BEFORE_STAMPS), now_ms, device)
     }
 }

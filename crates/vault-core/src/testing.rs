@@ -129,6 +129,11 @@ impl Storage for MemoryVaultFolder {
         self.writable_files()?.replicas.insert(device_id, bytes);
         Ok(())
     }
+
+    fn delete_replica(&self, device_id: String) -> Result<(), StorageError> {
+        self.writable_files()?.replicas.remove(&device_id);
+        Ok(())
+    }
 }
 
 /// Uma pasta local em memória: os ficheiros de um só dispositivo, fora da
@@ -357,7 +362,7 @@ pub fn device_public_key(
 
 /// O corpo de uma réplica decifrada só com os dispositivos `device_ids` na
 /// lista de dispositivos conhecidos, para comparar o que fundiram dispositivos
-/// que se registaram a si próprios. `None` se o corpo não se ler.
+/// diferentes, que se conhecem a si próprios. `None` se o corpo não se ler.
 pub fn body_keeping_devices(body: &[u8], device_ids: &[String]) -> Option<Vec<u8>> {
     let mut body = replica::decode_body(body).ok()?;
     body.devices

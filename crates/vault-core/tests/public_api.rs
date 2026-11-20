@@ -1,9 +1,10 @@
 //! A API pública tem de poder ser exposta via UniFFI (ADR-0011).
 
 use vault_core::{
-    EntryChanges, EntryFields, EntryState, EntrySummary, GeneratorSettings, HistoryVersion,
-    KdfParams, MergeReport, PassphraseSeparator, SecretField, SkippedReplica, StorageError,
-    SystemClock, Vault, VaultError,
+    DeviceStatus, EntryChanges, EntryFields, EntryState, EntrySummary, GeneratorSettings,
+    HistoryVersion, KdfParams, KnownDeviceSummary, MergeReport, PassphraseSeparator,
+    PendingDeviceSummary, SecretField, SkipReason, SkippedReplica, StorageError, SystemClock,
+    Vault, VaultError,
 };
 
 fn assert_send_sync<T: Send + Sync + 'static>() {}
@@ -25,4 +26,8 @@ fn public_types_can_cross_threads_as_uniffi_requires() {
     assert_send_sync::<PassphraseSeparator>();
     assert_send_sync::<MergeReport>();
     assert_send_sync::<SkippedReplica>();
+    assert_send_sync::<SkipReason>();
+    assert_send_sync::<DeviceStatus>();
+    assert_send_sync::<KnownDeviceSummary>();
+    assert_send_sync::<PendingDeviceSummary>();
 }

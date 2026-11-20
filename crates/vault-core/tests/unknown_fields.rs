@@ -251,7 +251,7 @@ fn unknown_fields_in_another_devices_replica_from_a_newer_minor_version_survive_
     let env = TestEnv::new();
     let [a, n] = [env.device(), env.device()];
     let vault_a = a.create_vault(PASSWORD);
-    let device_n = n.join_vault(PASSWORD).device_id();
+    let device_n = n.join_vault_accepted_by(PASSWORD, &vault_a).device_id();
     let devices = known_devices(&[(&a, &vault_a.device_id()), (&n, &device_n)]);
     // N passa a ser de uma versão secundária mais nova: a sua réplica tem um
     // campo desconhecido no corpo e outro numa entrada, com carimbo de N, e
@@ -309,7 +309,8 @@ fn unknown_fields_in_another_devices_replica_from_a_newer_minor_version_survive_
 }
 
 /// A lista de dispositivos conhecidos com os `devices` (dispositivo de teste,
-/// id), em CBOR pela ordem canónica: pelo id.
+/// id), todos aceites em `START_MS`, em CBOR pela ordem canónica: pelo id, e
+/// os campos de cada um pela ordem da chave codificada.
 fn known_devices(devices: &[(&TestDevice, &str)]) -> Vec<u8> {
     let mut devices: Vec<(Vec<u8>, Vec<u8>)> = devices
         .iter()
@@ -317,7 +318,11 @@ fn known_devices(devices: &[(&TestDevice, &str)]) -> Vec<u8> {
             let public_key =
                 testing::device_public_key(&device.local, &device.folder, PASSWORD).unwrap();
             let id = from_hex(id);
-            let record = map(&[("id", bytes(&id)), ("public_key", bytes(&public_key))]);
+            let record = map(&[
+                ("id", bytes(&id)),
+                ("public_key", bytes(&public_key)),
+                ("accepted_at_ms", uint(START_MS as u64)),
+            ]);
             (id, record)
         })
         .collect();

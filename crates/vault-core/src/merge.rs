@@ -34,7 +34,9 @@ pub struct MergeReport {
 }
 
 /// Uma réplica de outro dispositivo que ficou de fora da fusão. O estado do
-/// cofre não muda por causa dela. A app mostra um alerta para cada uma.
+/// cofre não muda por causa dela. A app mostra um alerta para cada uma; para
+/// uma em quarentena que seja de um dispositivo pendente
+/// ([`crate::Vault::pending_devices`]), propõe aceitá-lo ou recusá-lo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkippedReplica {
     /// O id do dispositivo dono da réplica, que é o nome do ficheiro.
@@ -57,6 +59,10 @@ pub enum SkipReason {
     /// Está bem assinada, mas a sua lista de dispositivos dá a um dispositivo
     /// que este conhece uma chave pública diferente da registada.
     ConflictingKey,
+    /// É de um dispositivo que este não conhece: um dispositivo pendente,
+    /// à espera de ser aceite, ou um desconhecido. Fica em quarentena até ser
+    /// aceite num dispositivo conhecido.
+    Quarantined,
     /// É de uma versão principal do formato mais recente do que a desta app
     /// (ADR-0008): a app tem de ser atualizada para a ler.
     UpdateRequired,
@@ -78,6 +84,11 @@ impl ReplicaBody {
         self.created_at_ms = self.created_at_ms.min(other.created_at_ms);
         self.unknown.merge(other.unknown);
         devices::merge(&mut self.devices, other.devices);
+        devices::merge_pending(
+            &mut self.pending_devices,
+            other.pending_devices,
+            &self.devices,
+        );
         for (id, tombstone) in other.tombstones {
             match self.tombstones.remove(&id) {
                 Some(kept) => self.tombstones.insert(id, latest(kept, tombstone)),

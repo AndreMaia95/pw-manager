@@ -123,6 +123,23 @@ impl DeviceKey {
     }
 }
 
+/// A impressão digital curta da chave pública `public_key`: os primeiros 8
+/// bytes do SHA-256 de um rótulo seguido da chave, em 4 grupos de 4
+/// algarismos hexadecimais maiúsculos separados por espaços, p. ex.
+/// `"3F2A 9C01 77DE B450"`. Confirma-se nos dois ecrãs ao aceitar um
+/// dispositivo pendente (ADR-0012). Com 64 bits, encontrar outra chave com a
+/// mesma impressão digital custa cerca de 2^64 pares de chaves.
+pub(crate) fn fingerprint(public_key: &PublicKey) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(message(FINGERPRINT_LABEL, &[public_key]));
+    let groups = digest[..8]
+        .chunks(2)
+        .map(|group| format!("{:02X}{:02X}", group[0], group[1]));
+    groups.collect::<Vec<_>>().join(" ")
+}
+
+const FINGERPRINT_LABEL: &[u8] = b"pw-manager/fingerprint/device";
+
 /// `signature` é uma assinatura válida de `label` seguido de `parts` pela
 /// chave `public_key`.
 pub(crate) fn verify(
@@ -164,4 +181,16 @@ fn encode_header(owner: &ReplicaOwner, nonce: &[u8; NONCE_LEN]) -> [u8; HEADER_L
         at += field.len();
     }
     header
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Valor de referência calculado fora do Rust (`hashlib.sha256` do
+    /// Python sobre o rótulo seguido de 32 bytes a zero).
+    #[test]
+    fn the_fingerprint_is_the_start_of_the_sha256_of_the_label_and_the_key() {
+        assert_eq!(fingerprint(&[0; PUBLIC_KEY_LEN]), "5601 DE66 A9BF EE26");
+    }
 }

@@ -1122,6 +1122,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_bytes",
+ "sha2",
  "thiserror",
  "unicode-normalization",
  "vault-core",

@@ -13,7 +13,7 @@
 
 use crate::crypto::{self, KEY_LEN, NONCE_LEN, SecretKey};
 use crate::device_key::DeviceKey;
-use crate::devices::{self, KnownDevice, KnownDevices};
+use crate::devices::{self, KnownDevice, KnownDevices, Trust};
 use crate::ids::Id;
 use crate::keyring::Keyring;
 use crate::merge::SkipReason;
@@ -107,21 +107,26 @@ pub fn keyring(data: &[u8]) {
 /// conhecido ou não. Depois com os mesmos bytes (cabeçalho e corpo em claro)
 /// cifrados pela chave do cofre e assinados pelo dispositivo: o leitor só
 /// aceita o cabeçalho do dono da réplica numa versão com assinatura, e um
-/// corpo que não dê outra chave ao dispositivo. Por fim assinados com outra
-/// chave: nunca entram. Em todos os casos, uma réplica de uma versão principal
-/// mais recente pede atualização sem ser lida.
+/// corpo que não dê outra chave ao dispositivo, se não estiver removido; se
+/// o dispositivo não for conhecido, a réplica fica em quarentena. Por fim
+/// assinados com outra chave: nunca entram. Em todos os casos, uma réplica de
+/// uma versão principal mais recente pede atualização sem ser lida.
 pub fn replica(data: &[u8]) {
     let owner = owner();
     let vault_key = SecretKey::new(VAULT_KEY);
     let device_key = DeviceKey::from_seed(&OWNER_DEVICE_SEED);
     let known = known_devices(owner.device_id);
     let newer_major = is_newer_major(data, b"PWMR");
-    let accept = |bytes: &[u8], known: Option<&KnownDevices>| {
-        devices::accept_replica(bytes, &owner, &vault_key, known)
-    };
+    let accept =
+        |bytes: &[u8], trust: Trust| devices::accept_replica(bytes, &owner, &vault_key, trust);
 
-    for known in [Some(&known), None] {
-        match accept(data, known) {
+    let no_devices = KnownDevices::new();
+    for trust in [
+        Trust::Known(&known),
+        Trust::Known(&no_devices),
+        Trust::KeyringSigner,
+    ] {
+        match accept(data, trust) {
             Err(SkipReason::UpdateRequired) => assert!(
                 newer_major,
                 "pediu atualização para uma réplica que não é de uma versão principal mais recente"
@@ -158,20 +163,38 @@ pub fn replica(data: &[u8]) {
     } else {
         match replica::decode_body(plaintext) {
             Err(_) => Err(SkipReason::Rejected),
+            // A chave de um dispositivo removido já não conta.
             Ok(body) => match body.devices.get(&owner.device_id) {
-                Some(device) if device.public_key != device_key.public_key() => {
+                Some(device) if !device.removed && device.public_key != device_key.public_key() => {
                     Err(SkipReason::ConflictingKey)
                 }
                 _ => Ok(body),
             },
         }
     };
-    assert_eq!(accept(&signed_by(&device_key), Some(&known)), expected);
+    assert_eq!(
+        accept(&signed_by(&device_key), Trust::Known(&known)),
+        expected
+    );
+
+    // Um dispositivo que não se conhece fica em quarentena, assinado ou não.
+    let quarantined = if newer_major {
+        Err(SkipReason::UpdateRequired)
+    } else if !belongs_to_owner {
+        Err(SkipReason::Rejected)
+    } else {
+        Err(SkipReason::Quarantined)
+    };
+    assert_eq!(
+        accept(&signed_by(&device_key), Trust::Known(&no_devices)),
+        quarantined,
+        "uma réplica de um dispositivo desconhecido não ficou em quarentena"
+    );
 
     let forged = signed_by(&DeviceKey::from_seed(&OTHER_DEVICE_SEED));
     if !newer_major && belongs_to_owner {
         assert_eq!(
-            accept(&forged, Some(&known)),
+            accept(&forged, Trust::Known(&known)),
             Err(SkipReason::InvalidSignature),
             "aceitou uma réplica assinada com outra chave"
         );
@@ -261,7 +284,7 @@ fn is_newer_major(data: &[u8], magic: &[u8; 4]) -> bool {
 /// chave pública da semente [`OWNER_DEVICE_SEED`].
 fn known_devices(device: Id) -> KnownDevices {
     let public_key = DeviceKey::from_seed(&OWNER_DEVICE_SEED).public_key();
-    KnownDevices::from([(device, KnownDevice::new(device, public_key))])
+    KnownDevices::from([(device, KnownDevice::new(device, public_key, None))])
 }
 
 fn owner() -> ReplicaOwner {

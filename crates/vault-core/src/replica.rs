@@ -21,8 +21,9 @@
 //! haver carimbos não o tem.
 //!
 //! O corpo é um mapa (ADR-0008). Nasceu na versão 1.0 com `created_at_ms`;
-//! `entries`, `tombstones` e `devices` (a lista de dispositivos conhecidos,
-//! [`crate::devices`]) foram acrescentados depois e só são escritos quando não
+//! `entries`, `tombstones`, `devices` (a lista de dispositivos conhecidos,
+//! [`crate::devices`]) e `pending_devices` (os dispositivos pendentes vistos,
+//! ticket 11) foram acrescentados depois e só são escritos quando não
 //! estão vazios. Cada um é um array de mapas, ordenado pelos bytes
 //! do id da entrada. Um id só está nos dois quando uma edição posterior à
 //! lápide lhe ganhou na fusão: a entrada e todo o seu histórico têm carimbos
@@ -39,10 +40,11 @@ use crate::VaultError;
 use crate::cbor::{self, MapReader, MapWriter, UnknownFields};
 use crate::crypto::{self, NONCE_LEN, SecretKey};
 use crate::device_key::{self, DeviceKey, PublicKey, SIGNATURE_LEN};
-use crate::devices::{KnownDevice, KnownDevices};
+use crate::devices::{KnownDevice, KnownDevices, PendingDevice, PendingDevices};
 use crate::entry::{Entry, EntryId};
 use crate::format_version::{self, FIRST_SIGNED_MINOR};
 use crate::ids::{DeviceId, ID_LEN, Id, VaultId};
+use crate::stamp::Stamp;
 use crate::trash::Tombstone;
 
 const MAGIC: [u8; 4] = *b"PWMR";
@@ -62,6 +64,9 @@ pub(crate) struct ReplicaBody {
     pub(crate) tombstones: BTreeMap<EntryId, Tombstone>,
     /// A lista de dispositivos conhecidos.
     pub(crate) devices: KnownDevices,
+    /// Os dispositivos pendentes vistos. Hoje só o próprio dispositivo, que
+    /// se descreve aqui enquanto espera ser aceite (ticket 11).
+    pub(crate) pending_devices: PendingDevices,
     /// Campos escritos por uma versão mais nova, preservados (ADR-0008).
     pub(crate) unknown: UnknownFields,
 }
@@ -74,14 +79,52 @@ impl ReplicaBody {
             entries: BTreeMap::new(),
             tombstones: BTreeMap::new(),
             devices: BTreeMap::new(),
+            pending_devices: BTreeMap::new(),
             unknown: UnknownFields::default(),
         }
     }
 
     /// Regista o dispositivo `id`, com a chave pública `public_key`, na lista
-    /// de dispositivos conhecidos.
-    pub(crate) fn register_device(&mut self, id: DeviceId, public_key: PublicKey) {
-        self.devices.insert(id, KnownDevice::new(id, public_key));
+    /// de dispositivos conhecidos, aceite em `accepted_at_ms`.
+    pub(crate) fn register_device(
+        &mut self,
+        id: DeviceId,
+        public_key: PublicKey,
+        accepted_at_ms: i64,
+    ) {
+        self.devices
+            .insert(id, KnownDevice::new(id, public_key, Some(accepted_at_ms)));
+    }
+
+    /// Aceita o dispositivo pendente `device` em `now_ms`: passa a ser um
+    /// dispositivo conhecido, com a chave e o nome com que se descreve. O
+    /// nome leva o carimbo `stamp`, de quem o aceita.
+    pub(crate) fn accept_device(&mut self, device: PendingDevice, now_ms: i64, stamp: Stamp) {
+        self.pending_devices.remove(&device.id);
+        let mut known = KnownDevice::new(device.id, device.public_key, Some(now_ms));
+        if !device.name.is_empty() {
+            known.name = device.name;
+            known.name_stamp = stamp;
+        }
+        self.devices.insert(device.id, known);
+    }
+
+    /// Marca o dispositivo `id` como removido, definitivamente. Um
+    /// dispositivo que ainda não era conhecido (um pendente recusado) entra na
+    /// lista já removido, com a chave `public_key`.
+    pub(crate) fn remove_device(&mut self, id: DeviceId, public_key: PublicKey) {
+        self.pending_devices.remove(&id);
+        self.devices
+            .entry(id)
+            .or_insert_with(|| KnownDevice::new(id, public_key, None))
+            .removed = true;
+    }
+
+    /// Descreve o dispositivo `id`, com a chave pública `public_key`, como
+    /// pendente, à espera de ser aceite por um dispositivo conhecido.
+    pub(crate) fn register_pending_device(&mut self, id: DeviceId, public_key: PublicKey) {
+        self.pending_devices
+            .insert(id, PendingDevice::new(id, public_key));
     }
 }
 
@@ -210,6 +253,14 @@ pub(crate) fn encode_body(body: &ReplicaBody) -> Zeroizing<Vec<u8>> {
         let devices = body.devices.values().map(KnownDevice::encode).collect();
         map.added_item("devices", cbor::encode_array(devices));
     }
+    if !body.pending_devices.is_empty() {
+        let pending = body
+            .pending_devices
+            .values()
+            .map(PendingDevice::encode)
+            .collect();
+        map.added_item("pending_devices", cbor::encode_array(pending));
+    }
     map.unknown(&body.unknown);
     map.finish()
 }
@@ -257,11 +308,19 @@ fn parse_body(plaintext: &[u8]) -> Option<ReplicaBody> {
             devices.insert(device.id, device);
         }
     }
+    let mut pending_devices = BTreeMap::new();
+    if let Some(items) = map.take("pending_devices") {
+        for item in cbor::split_array(items)? {
+            let device = PendingDevice::decode(item)?;
+            pending_devices.insert(device.id, device);
+        }
+    }
     Some(ReplicaBody {
         created_at_ms,
         entries,
         tombstones,
         devices,
+        pending_devices,
         unknown: map.into_unknown(),
     })
 }

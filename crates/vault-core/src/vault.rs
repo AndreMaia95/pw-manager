@@ -2,8 +2,10 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::crypto::{self, SecretKey};
-use crate::device_key::DeviceKey;
-use crate::devices;
+use crate::device_key::{self, DeviceKey};
+use crate::devices::{
+    self, DeviceStatus, KnownDevice, KnownDeviceSummary, KnownDevices, PendingDeviceSummary, Trust,
+};
 use crate::entry::{
     Entry, EntryChanges, EntryFields, EntryId, EntrySummary, HistoryVersion, PendingChanges,
     SecretField, VersionId,
@@ -90,7 +92,7 @@ impl Vault {
         storage.write_keyring(keyring)?;
 
         let mut body = ReplicaBody::empty(clock.now_ms());
-        body.register_device(device_id, device_key.public_key());
+        body.register_device(device_id, device_key.public_key(), body.created_at_ms);
         let vault = Self {
             storage,
             local,
@@ -112,22 +114,25 @@ impl Vault {
     /// Junta este dispositivo ao cofre que já está na pasta do cofre, com um id
     /// de dispositivo próprio: desembrulha a chave do cofre com a palavra-passe
     /// mestra, funde as réplicas dos outros dispositivos, gera a chave deste
-    /// dispositivo (que fica na pasta local) e escreve a sua réplica, que o
-    /// regista na lista de dispositivos conhecidos. Devolve o cofre
-    /// desbloqueado.
+    /// dispositivo (que fica na pasta local) e escreve a sua réplica, em que se
+    /// descreve como dispositivo pendente. Devolve o cofre desbloqueado.
+    ///
+    /// O dispositivo fica pendente (ADR-0012): vê o cofre e edita-o, mas a sua
+    /// réplica fica em quarentena nos outros dispositivos até ser aceite num
+    /// dispositivo conhecido ([`Vault::accept_device`]). Sabe-se aceite depois
+    /// de fundir a réplica de quem o aceitou ([`Vault::device_status`]).
     ///
     /// Só entram as réplicas que [`Vault::merge`] aceita. Como este
     /// dispositivo ainda não conhece nenhum, a primeira a entrar é a do
-    /// dispositivo que assinou o chaveiro, e as dos dispositivos que essa
-    /// regista têm de estar assinadas pelas chaves que ela lhes dá. O chaveiro
-    /// tem de estar assinado por um dispositivo conhecido das réplicas que
-    /// entraram; se não estiver, dá [`VaultError::KeyringRejected`] sem
-    /// escrever nada.
+    /// dispositivo que assinou o chaveiro, a raiz de confiança, e depois as
+    /// dos dispositivos que essa regista, assinadas pelas chaves que ela lhes
+    /// dá. O chaveiro tem de estar assinado por um dispositivo conhecido das
+    /// réplicas que entraram; se não estiver, dá
+    /// [`VaultError::KeyringRejected`] sem escrever nada.
     ///
     /// Uma réplica de uma versão principal do formato mais recente dá
     /// [`VaultError::UpdateRequired`], sem escrever nada: esta app não sabe ler
-    /// o cofre todo (ADR-0008). Nesta versão o dispositivo entra sem ter de ser
-    /// aceite (ticket 11).
+    /// o cofre todo (ADR-0008).
     pub fn join(
         storage: Arc<dyn Storage>,
         local: Arc<dyn LocalStorage>,
@@ -160,7 +165,7 @@ impl Vault {
             .unwrap_or_else(|| ReplicaBody::empty(vault.clock.now_ms()));
         keyring.verify(|id| devices::signing_public_key(&body.devices, id))?;
         let device_key = DeviceKey::generate()?;
-        body.register_device(vault.device_id, device_key.public_key());
+        body.register_pending_device(vault.device_id, device_key.public_key());
         vault
             .local
             .write_device_key(device_key.seal(&vault.owner(generation), &vault_key)?)?;
@@ -203,10 +208,11 @@ impl Vault {
     ///
     /// Um chaveiro de uma versão do formato anterior é reescrito na versão
     /// atual, com um invólucro novo da mesma palavra-passe mestra, assinado
-    /// por este dispositivo; se a escrita falhar, o desbloqueio não falha por
-    /// isso. Um dispositivo de antes das assinaturas (só os vetores de teste
-    /// 1.0) não tem chave na pasta local e tem uma réplica 1.0, sem
-    /// assinatura: é migrado aqui (ver `Vault::migrate_to_signatures`).
+    /// por este dispositivo, se for um dispositivo conhecido; se a escrita
+    /// falhar, o desbloqueio não falha por isso. Um dispositivo de antes das
+    /// assinaturas (só os vetores de teste 1.0) não tem chave na pasta local e
+    /// tem uma réplica 1.0, sem assinatura: é migrado aqui (ver
+    /// `Vault::migrate_to_signatures`).
     pub fn unlock_with_master_password(&self, master_password: &str) -> Result<(), VaultError> {
         let keyring = read_keyring(self.storage.as_ref())?;
         if keyring.vault_id() != self.vault_id {
@@ -262,7 +268,9 @@ impl Vault {
             None if sealed.owner() != owner => return Err(VaultError::ReplicaRejected),
             None => self.migrate_to_signatures(&keyring, &sealed, vault_key, master_password)?,
         };
-        if !keyring.is_current_version() {
+        // Só um dispositivo conhecido assina o chaveiro: um assinado por um
+        // pendente seria rejeitado pelos outros.
+        if !keyring.is_current_version() && self.is_known(&session.body) {
             let _ = self.rewrite_keyring(&keyring, &session, master_password);
         }
         if session.body.expire_trash(self.clock.now_ms()) {
@@ -328,7 +336,7 @@ impl Vault {
         let mut body = sealed.open(&vault_key)?;
         let generation = keyring.generation();
         let device_key = DeviceKey::generate()?;
-        body.register_device(self.device_id, device_key.public_key());
+        body.register_device(self.device_id, device_key.public_key(), self.clock.now_ms());
         let session = Session {
             vault_key,
             device_key,
@@ -363,6 +371,166 @@ impl Vault {
 
     pub fn vault_id(&self) -> String {
         self.vault_id.to_string()
+    }
+
+    /// O estado deste dispositivo: pendente até ser aceite por um dispositivo
+    /// conhecido, conhecido, ou removido.
+    pub fn device_status(&self) -> Result<DeviceStatus, VaultError> {
+        self.read_now(|body| Ok(devices::status(&body.devices, self.device_id)))
+    }
+
+    /// A impressão digital curta da chave pública deste dispositivo, para
+    /// confirmar com a que o dispositivo conhecido mostra ao aceitá-lo.
+    pub fn device_fingerprint(&self) -> Result<String, VaultError> {
+        let session = self.session();
+        let session = session.as_ref().ok_or(VaultError::Locked)?;
+        Ok(device_key::fingerprint(&session.device_key.public_key()))
+    }
+
+    /// Os dispositivos pendentes com réplica na pasta do cofre, pela ordem do
+    /// id: as réplicas de dispositivos que este não conhece que se descrevem
+    /// como pendentes e estão assinadas pela chave com que se descrevem.
+    pub fn pending_devices(&self) -> Result<Vec<PendingDeviceSummary>, VaultError> {
+        let session = self.session();
+        let session = session.as_ref().ok_or(VaultError::Locked)?;
+        let mut pending = Vec::new();
+        for (device_id, bytes) in self.other_replicas()? {
+            if session.body.devices.contains_key(&device_id) {
+                continue;
+            }
+            let owner = self.owner_of(device_id, session.generation);
+            if let Some(device) = devices::read_pending_device(&bytes, &owner, &session.vault_key) {
+                pending.push(device.summary());
+            }
+        }
+        Ok(pending)
+    }
+
+    /// Aceita o dispositivo pendente `device_id`, depois de o utilizador
+    /// confirmar nos dois ecrãs a impressão digital `fingerprint`: passa a
+    /// ser um dispositivo conhecido, e a sua réplica entra na próxima fusão.
+    ///
+    /// A réplica dele é lida de novo da pasta do cofre, e a impressão digital
+    /// tem de ser a da chave com que se descreve agora; se não for, dá
+    /// [`VaultError::FingerprintMismatch`] sem mudar nada. Só um dispositivo
+    /// conhecido aceita dispositivos. Aceitar um dispositivo já conhecido não
+    /// muda nada; um removido dá [`VaultError::DeviceRemoved`].
+    pub fn accept_device(&self, device_id: &str, fingerprint: &str) -> Result<(), VaultError> {
+        let id = Id::from_hex(device_id).ok_or(VaultError::DeviceNotFound)?;
+        let mut session = self.session();
+        let session = session.as_mut().ok_or(VaultError::Locked)?;
+        self.require_known(session)?;
+        match session.body.devices.get(&id) {
+            Some(device) if device.removed => return Err(VaultError::DeviceRemoved),
+            Some(_) => return Ok(()),
+            None => {}
+        }
+        let device = self.read_pending_device(session, id)?;
+        if device_key::fingerprint(&device.public_key) != fingerprint {
+            return Err(VaultError::FingerprintMismatch);
+        }
+        let now_ms = self.clock.now_ms();
+        self.change_session(session, |body| {
+            let stamp = body.next_stamp(now_ms, self.device_id);
+            body.accept_device(device, now_ms, stamp);
+            Ok(())
+        })
+    }
+
+    /// A lista de dispositivos conhecidos, incluindo os removidos (e os
+    /// pendentes recusados), pela ordem do id.
+    pub fn known_devices(&self) -> Result<Vec<KnownDeviceSummary>, VaultError> {
+        self.read_now(|body| Ok(body.devices.values().map(KnownDevice::summary).collect()))
+    }
+
+    /// Dá o nome `name` ao dispositivo `device_id`. Um dispositivo pendente
+    /// só dá nome a si próprio, e é com esse nome que aparece a quem o vai
+    /// aceitar. Um conhecido dá nome a qualquer dispositivo conhecido; na
+    /// fusão ganha o nome mais recente.
+    pub fn set_device_name(&self, device_id: &str, name: &str) -> Result<(), VaultError> {
+        let id = Id::from_hex(device_id).ok_or(VaultError::DeviceNotFound)?;
+        let now_ms = self.clock.now_ms();
+        self.change(|body| match body.pending_devices.get_mut(&id) {
+            Some(pending) if id == self.device_id => {
+                pending.name = name.to_owned();
+                Ok(())
+            }
+            _ => {
+                if !self.is_known(body) {
+                    return Err(VaultError::ThisDeviceNotKnown);
+                }
+                let stamp = body.next_stamp(now_ms, self.device_id);
+                let device = body
+                    .devices
+                    .get_mut(&id)
+                    .ok_or(VaultError::DeviceNotFound)?;
+                device.name = name.to_owned();
+                device.name_stamp = stamp;
+                Ok(())
+            }
+        })
+    }
+
+    /// Recusa o dispositivo pendente `device_id`: fica marcado como removido,
+    /// definitivamente, e a sua réplica é apagada da pasta do cofre. A sua
+    /// réplica nunca mais entra na fusão, mesmo que outro dispositivo o tenha
+    /// aceitado entretanto. Só um dispositivo conhecido recusa dispositivos.
+    ///
+    /// Um dispositivo que não esteja pendente dá
+    /// [`VaultError::DeviceNotFound`]: um conhecido remove-se com
+    /// [`Vault::remove_device`].
+    pub fn refuse_device(&self, device_id: &str) -> Result<(), VaultError> {
+        let id = Id::from_hex(device_id).ok_or(VaultError::DeviceNotFound)?;
+        let mut session = self.session();
+        let session = session.as_mut().ok_or(VaultError::Locked)?;
+        self.require_known(session)?;
+        if session.body.devices.contains_key(&id) {
+            return Err(VaultError::DeviceNotFound);
+        }
+        let device = self.read_pending_device(session, id)?;
+        self.change_session(session, |body| {
+            body.remove_device(id, device.public_key);
+            Ok(())
+        })?;
+        self.delete_replica_of_removed(id);
+        Ok(())
+    }
+
+    /// Apaga da pasta do cofre a réplica do dispositivo `id`, que este acabou
+    /// de marcar como removido. Se não se apagar, a remoção vale na mesma: a
+    /// réplica fica na pasta, mas nunca mais entra na fusão.
+    fn delete_replica_of_removed(&self, id: DeviceId) {
+        let _ = self.storage.delete_replica(id.to_string());
+    }
+
+    /// O dispositivo pendente que a réplica de `id`, como está agora na pasta
+    /// do cofre, descreve. Sem réplica, ou sem uma que se descreva assinada
+    /// pela chave com que se descreve, dá [`VaultError::DeviceNotFound`].
+    fn read_pending_device(
+        &self,
+        session: &Session,
+        id: DeviceId,
+    ) -> Result<devices::PendingDevice, VaultError> {
+        let bytes = self
+            .storage
+            .read_replica(id.to_string())?
+            .ok_or(VaultError::DeviceNotFound)?;
+        let owner = self.owner_of(id, session.generation);
+        devices::read_pending_device(&bytes, &owner, &session.vault_key)
+            .ok_or(VaultError::DeviceNotFound)
+    }
+
+    /// Só um dispositivo conhecido muda a lista de dispositivos.
+    fn require_known(&self, session: &Session) -> Result<(), VaultError> {
+        match self.is_known(&session.body) {
+            true => Ok(()),
+            false => Err(VaultError::ThisDeviceNotKnown),
+        }
+    }
+
+    /// Este dispositivo é conhecido em `body`: nem pendente, nem removido.
+    fn is_known(&self, body: &ReplicaBody) -> bool {
+        devices::status(&body.devices, self.device_id) == DeviceStatus::Known
     }
 
     /// Quando o cofre foi criado, em milissegundos desde 1970-01-01T00:00:00Z.
@@ -557,10 +725,10 @@ impl Vault {
     /// chave pública registada do seu dispositivo, cuja lista de dispositivos
     /// não dê outra chave a um dispositivo conhecido (ADR-0012). As outras, e
     /// as que não se conseguem ler, ficam de fora e são indicadas no
-    /// resultado, sem mudar o estado do cofre. Nesta versão, a réplica de um
-    /// dispositivo ainda desconhecido entra se estiver assinada pela chave com
-    /// que ela o regista (ticket 11). Se a escrita da réplica falhar, o estado
-    /// fica como estava.
+    /// resultado, sem mudar o estado do cofre. A réplica de um dispositivo que
+    /// este não conhece fica em quarentena ([`SkipReason::Quarantined`]): a de
+    /// um dispositivo pendente entra depois de ele ser aceite. Se a escrita da
+    /// réplica falhar, o estado fica como estava.
     pub fn merge(&self) -> Result<MergeReport, VaultError> {
         let mut session = self.session();
         let session = session.as_mut().ok_or(VaultError::Locked)?;
@@ -585,14 +753,15 @@ impl Vault {
     }
 
     /// Marca o dispositivo `device_id` como removido na lista de dispositivos
-    /// conhecidos, e escreve a réplica. A marca é definitiva: a réplica dele
-    /// deixa de entrar na fusão, nenhuma fusão o volta a tornar conhecido, e
-    /// um chaveiro assinado por ele deixa de ser aceite. Apagar a sua réplica
-    /// da pasta do cofre fica para o ticket 11.
+    /// conhecidos, escreve a réplica e apaga a dele da pasta do cofre. A
+    /// marca é definitiva: a réplica dele deixa de entrar na fusão, nenhuma
+    /// fusão o volta a tornar conhecido, e um chaveiro assinado por ele deixa
+    /// de ser aceite. Só um dispositivo conhecido remove dispositivos.
     ///
     /// Se foi ele que assinou o chaveiro atual, este dispositivo volta a
     /// assiná-lo antes de escrever a réplica, com o cabeçalho e os invólucros
-    /// iguais. Se isso falhar, nada muda.
+    /// iguais. Se isso falhar, nada muda. Se só a réplica dele não se apagar,
+    /// a remoção vale na mesma.
     pub fn remove_device(&self, device_id: &str) -> Result<(), VaultError> {
         let id = Id::from_hex(device_id).ok_or(VaultError::DeviceNotFound)?;
         if id == self.device_id {
@@ -600,17 +769,19 @@ impl Vault {
         }
         let mut session = self.session();
         let session = session.as_mut().ok_or(VaultError::Locked)?;
-        self.expire_trash(session);
-        let mut body = session.body.clone();
-        let device = body
+        self.require_known(session)?;
+        let device = session
+            .body
             .devices
-            .get_mut(&id)
+            .get(&id)
             .ok_or(VaultError::DeviceNotFound)?;
-        device.removed = true;
+        let public_key = device.public_key;
         self.resign_keyring_signed_by(id, session)?;
-        self.write_replica(session, &body)?;
-        session.body = body;
-        session.unsaved = false;
+        self.change_session(session, |body| {
+            body.remove_device(id, public_key);
+            Ok(())
+        })?;
+        self.delete_replica_of_removed(id);
         Ok(())
     }
 
@@ -675,6 +846,15 @@ impl Vault {
     ) -> Result<T, VaultError> {
         let mut session = self.session();
         let session = session.as_mut().ok_or(VaultError::Locked)?;
+        self.change_session(session, edit)
+    }
+
+    /// [`Vault::change`] sobre a sessão já trancada.
+    fn change_session<T>(
+        &self,
+        session: &mut Session,
+        edit: impl FnOnce(&mut ReplicaBody) -> Result<T, VaultError>,
+    ) -> Result<T, VaultError> {
         self.expire_trash(session);
         let mut body = session.body.clone();
         let result = edit(&mut body)?;
@@ -736,19 +916,7 @@ impl Vault {
         body: Option<ReplicaBody>,
         first: Option<DeviceId>,
     ) -> Result<Merged, VaultError> {
-        let mut replicas = Vec::new();
-        for name in self.storage.list_replicas()? {
-            let Some(device_id) = Id::from_hex(&name) else {
-                continue;
-            };
-            if device_id == self.device_id {
-                continue;
-            }
-            if let Some(bytes) = self.storage.read_replica(name)? {
-                replicas.push((device_id, bytes));
-            }
-        }
-        replicas.sort_by_key(|(device_id, _)| *device_id);
+        let replicas = self.other_replicas()?;
         let mut removed = BTreeSet::new();
         loop {
             let pass = self.merge_pass(
@@ -774,6 +942,26 @@ impl Vault {
             }
             removed.extend(merged_removed);
         }
+    }
+
+    /// As réplicas dos outros dispositivos na pasta do cofre, pela ordem do
+    /// id. Um ficheiro cujo nome não é um id de dispositivo não é uma réplica,
+    /// e é ignorado.
+    fn other_replicas(&self) -> Result<Vec<(DeviceId, Vec<u8>)>, VaultError> {
+        let mut replicas = Vec::new();
+        for name in self.storage.list_replicas()? {
+            let Some(device_id) = Id::from_hex(&name) else {
+                continue;
+            };
+            if device_id == self.device_id {
+                continue;
+            }
+            if let Some(bytes) = self.storage.read_replica(name)? {
+                replicas.push((device_id, bytes));
+            }
+        }
+        replicas.sort_by_key(|(device_id, _)| *device_id);
+        Ok(replicas)
     }
 
     /// Uma passagem de [`Vault::merge_other_replicas`], com as réplicas dos
@@ -821,13 +1009,14 @@ impl Vault {
                 break;
             };
             let (device_id, bytes) = pending.remove(next);
-            let owner = ReplicaOwner {
-                vault_id: self.vault_id,
-                device_id: *device_id,
-                generation,
+            let owner = self.owner_of(*device_id, generation);
+            let no_devices = KnownDevices::new();
+            let trust = match &body {
+                Some(body) => Trust::Known(&body.devices),
+                None if Some(*device_id) == first => Trust::KeyringSigner,
+                None => Trust::Known(&no_devices),
             };
-            let known = body.as_ref().map(|body| &body.devices);
-            match devices::accept_replica(bytes, &owner, vault_key, known) {
+            match devices::accept_replica(bytes, &owner, vault_key, trust) {
                 Ok(other) => {
                     accepted.push(*device_id);
                     clock_ahead.extend(other.devices_with_clock_ahead(now_ms));
@@ -854,9 +1043,15 @@ impl Vault {
     }
 
     fn owner(&self, generation: u64) -> ReplicaOwner {
+        self.owner_of(self.device_id, generation)
+    }
+
+    /// A quem tem de pertencer a réplica do dispositivo `device_id` neste
+    /// cofre e nesta geração.
+    fn owner_of(&self, device_id: DeviceId, generation: u64) -> ReplicaOwner {
         ReplicaOwner {
             vault_id: self.vault_id,
-            device_id: self.device_id,
+            device_id,
             generation,
         }
     }

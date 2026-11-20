@@ -43,12 +43,19 @@ fn skipped(device_id: &str, reason: SkipReason) -> Vec<SkippedReplica> {
     }]
 }
 
+/// Junta `device` ao cofre só para ter a chave de outro dispositivo: a sua
+/// réplica, pendente, sai da pasta do cofre.
+fn join_as_key_source(env: &TestEnv, device: &TestDevice) {
+    let joined = device.join_vault(PASSWORD);
+    env.folder.delete_replica(&joined.device_id());
+}
+
 #[test]
 fn each_device_keeps_its_private_key_in_its_local_folder_and_never_in_the_vault_folder() {
     let env = TestEnv::new();
     let [a, b] = [env.device(), env.device()];
     let vault_a = a.create_vault(PASSWORD);
-    let vault_b = b.join_vault(PASSWORD);
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
     vault_a.merge().unwrap();
 
     let key_a = testing::device_private_key(&a.local, &env.folder, PASSWORD).unwrap();
@@ -74,7 +81,7 @@ fn a_replica_with_an_invalid_signature_is_rejected_without_changing_the_vault() 
     let env = TestEnv::new();
     let [a, b] = [env.device(), env.device()];
     let vault_a = a.create_vault(PASSWORD);
-    let vault_b = b.join_vault(PASSWORD);
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
     vault_b.create_entry(entry("Correio")).unwrap();
     let device_b = vault_b.device_id();
     let mut tampered = env.folder.replica(&device_b).unwrap();
@@ -98,7 +105,7 @@ fn a_replica_with_its_header_changed_is_rejected_without_changing_the_vault() {
     let env = TestEnv::new();
     let [a, b] = [env.device(), env.device()];
     let vault_a = a.create_vault(PASSWORD);
-    let vault_b = b.join_vault(PASSWORD);
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
     vault_a.merge().unwrap();
     vault_b.create_entry(entry("Correio")).unwrap();
     let device_b = vault_b.device_id();
@@ -124,8 +131,8 @@ fn a_replica_with_the_id_of_a_known_device_signed_with_another_key_is_rejected()
     let env = TestEnv::new();
     let [a, b, e] = [env.device(), env.device(), env.device()];
     let vault_a = a.create_vault(PASSWORD);
-    let vault_b = b.join_vault(PASSWORD);
-    e.join_vault(PASSWORD);
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
+    join_as_key_source(&env, &e);
     vault_a.merge().unwrap();
     let device_b = vault_b.device_id();
     let replica = testing::open_replica(&env.folder, &device_b, PASSWORD).unwrap();
@@ -146,8 +153,8 @@ fn the_replica_of_a_removed_device_is_rejected_and_merging_never_makes_it_known_
     let env = TestEnv::new();
     let [a, b, c, d] = [env.device(), env.device(), env.device(), env.device()];
     let vault_a = a.create_vault(PASSWORD);
-    let vault_b = b.join_vault(PASSWORD);
-    let vault_c = c.join_vault(PASSWORD);
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
+    let vault_c = c.join_vault_accepted_by(PASSWORD, &vault_a);
     vault_a.merge().unwrap();
     vault_b.merge().unwrap();
     let device_c = vault_c.device_id();
@@ -249,8 +256,8 @@ fn a_well_signed_replica_that_gives_a_known_device_another_key_is_rejected() {
     let env = TestEnv::new();
     let [a, b, e] = [env.device(), env.device(), env.device()];
     let vault_a = a.create_vault(PASSWORD);
-    let vault_b = b.join_vault(PASSWORD);
-    e.join_vault(PASSWORD);
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
+    join_as_key_source(&env, &e);
     vault_a.merge().unwrap();
     vault_b.create_entry(entry("Correio")).unwrap();
     let device_b = vault_b.device_id();
@@ -272,8 +279,8 @@ fn the_known_device_list_is_merged_so_a_device_learns_the_key_of_one_it_never_re
     let env = TestEnv::new();
     let [a, b, c, e] = [env.device(), env.device(), env.device(), env.device()];
     let vault_a = a.create_vault(PASSWORD);
-    let vault_b = b.join_vault(PASSWORD);
-    e.join_vault(PASSWORD);
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
+    join_as_key_source(&env, &e);
     vault_a.merge().unwrap();
     let device_b = vault_b.device_id();
     let genuine = env.folder.replica(&device_b).unwrap();
@@ -283,7 +290,7 @@ fn the_known_device_list_is_merged_so_a_device_learns_the_key_of_one_it_never_re
     // de A. Depois aparece uma réplica com o id de B que se regista com a
     // chave de E, assinada por ela.
     env.folder.delete_replica(&device_b);
-    let vault_c = c.join_vault(PASSWORD);
+    let vault_c = c.join_vault_accepted_by(PASSWORD, &vault_a);
     testing::write_replica(&env.folder, &e.local, &device_b, PASSWORD, forged).unwrap();
     let forged_report = vault_c.merge().unwrap();
     env.folder.put_replica(&device_b, genuine);
@@ -305,7 +312,7 @@ fn a_device_that_joins_checks_the_keyring_writer_first_so_a_forged_replica_canno
         let [a, b, e] = [env.device(), env.device(), env.device()];
         let vault_a = a.create_vault(PASSWORD);
         vault_a.create_entry(entry("Banco")).unwrap();
-        let vault_b = b.join_vault(PASSWORD);
+        let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
         if vault_b.device_id() < vault_a.device_id() {
             vault_a.merge().unwrap();
             break (env, a, b, e, vault_b);
@@ -341,7 +348,7 @@ fn a_keyring_written_by_a_device_that_is_not_known_is_rejected() {
         local: MemoryLocalFolder::new(),
         clock: ManualClock::new(common::START_MS),
     };
-    e.join_vault(PASSWORD);
+    join_as_key_source(&env, &e);
 
     testing::reseal_keyring(&env.folder, &e.local, PASSWORD).unwrap();
 
@@ -478,8 +485,8 @@ fn a_removed_device_stays_out_of_the_merge_whatever_the_order_of_the_replicas() 
         let env = TestEnv::new();
         let [a, b, c] = [env.device(), env.device(), env.device()];
         let vault_a = a.create_vault(PASSWORD);
-        let vault_b = b.join_vault(PASSWORD);
-        let vault_c = c.join_vault(PASSWORD);
+        let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
+        let vault_c = c.join_vault_accepted_by(PASSWORD, &vault_a);
         if vault_c.device_id() < vault_b.device_id() {
             vault_a.merge().unwrap();
             vault_b.merge().unwrap();
@@ -539,9 +546,11 @@ fn keyring_signer(keyring: &[u8]) -> Vec<u8> {
 fn removing_the_device_that_signed_the_keyring_makes_this_one_sign_it_with_the_same_envelopes() {
     let env = TestEnv::new();
     let [a, b, c] = [env.device(), env.device(), env.device()];
-    let device_a = a.create_vault(PASSWORD).device_id();
-    let vault_b = b.join_vault(PASSWORD);
-    let vault_c = c.join_vault(PASSWORD);
+    let vault_a = a.create_vault(PASSWORD);
+    let device_a = vault_a.device_id();
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
+    let vault_c = c.join_vault_accepted_by(PASSWORD, &vault_a);
+    vault_b.merge().unwrap();
     let before = env.folder.keyring().unwrap();
 
     vault_b.remove_device(&device_a).unwrap();
@@ -565,7 +574,7 @@ fn removing_a_device_that_did_not_sign_the_keyring_leaves_the_keyring_as_it_is()
     let env = TestEnv::new();
     let [a, b] = [env.device(), env.device()];
     let vault_a = a.create_vault(PASSWORD);
-    let device_b = b.join_vault(PASSWORD).device_id();
+    let device_b = b.join_vault_accepted_by(PASSWORD, &vault_a).device_id();
     vault_a.merge().unwrap();
     let keyring = env.folder.keyring();
 
@@ -578,8 +587,10 @@ fn removing_a_device_that_did_not_sign_the_keyring_leaves_the_keyring_as_it_is()
 fn a_keyring_signed_by_a_removed_device_is_rejected() {
     let env = TestEnv::new();
     let [a, b] = [env.device(), env.device()];
-    let device_a = a.create_vault(PASSWORD).device_id();
-    let vault_b = b.join_vault(PASSWORD);
+    let vault_a = a.create_vault(PASSWORD);
+    let device_a = vault_a.device_id();
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
+    vault_b.merge().unwrap();
     vault_b.remove_device(&device_a).unwrap();
 
     // A, que tem a sua chave, volta a assinar o chaveiro.
@@ -600,8 +611,10 @@ fn a_keyring_signed_by_a_removed_device_is_rejected() {
 fn a_keyring_of_a_new_generation_written_by_a_removed_device_is_rejected() {
     let env = TestEnv::new();
     let [a, b] = [env.device(), env.device()];
-    let device_a = a.create_vault(PASSWORD).device_id();
-    let vault_b = b.join_vault(PASSWORD);
+    let vault_a = a.create_vault(PASSWORD);
+    let device_a = vault_a.device_id();
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
+    vault_b.merge().unwrap();
     vault_b.remove_device(&device_a).unwrap();
 
     // A escreve uma geração nova do chaveiro, como numa alteração da
@@ -652,14 +665,16 @@ fn the_keyring_still_opens_on_every_known_device_after_its_envelope_writer_is_re
     let env = TestEnv::new();
     let [a, b, c] = [env.device(), env.device(), env.device()];
     let vault_a = a.create_vault(PASSWORD);
-    let vault_b = b.join_vault(PASSWORD);
-    let vault_c = c.join_vault(PASSWORD);
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
+    let vault_c = c.join_vault_accepted_by(PASSWORD, &vault_a);
     let device_a = vault_a.device_id();
     vault_b.merge().unwrap();
 
     vault_b.remove_device(&device_a).unwrap();
     // C funde e fica a saber que A, que escreveu os invólucros, foi removido.
+    // A, que não sabe, volta a escrever a sua réplica, que B tinha apagado.
     vault_c.merge().unwrap();
+    vault_a.save_replica().unwrap();
 
     let keyring = env.folder.keyring().unwrap();
     assert_eq!(keyring[KEYRING_WRITER], common::from_hex(&device_a));

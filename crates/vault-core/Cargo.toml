@@ -13,6 +13,7 @@ ed25519-dalek = { version = "3.0.0", default-features = false, features = ["fast
 getrandom = "0.4.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_bytes = "0.11.19"
+sha2 = { version = "0.11.1", default-features = false }
 thiserror = "2.0.21"
 unicode-normalization = "0.1.26"
 zeroize = "1.9.1"

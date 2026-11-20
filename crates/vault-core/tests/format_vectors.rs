@@ -41,6 +41,18 @@ struct ExpectedState {
     /// Ids de dispositivos removidos, cuja réplica está no vetor e tem de
     /// ficar de fora da fusão.
     removed_devices: &'static [&'static str],
+    /// Dispositivos da lista de dispositivos conhecidos, com o nome e a data
+    /// de aceitação que têm de ter (ticket 11). A lista pode ter outros.
+    known_devices: &'static [ExpectedDevice],
+    /// Os dispositivos pendentes com réplica no vetor, (id, nome), pela
+    /// ordem do id: todos os que a versão atual tem de ver.
+    pending_devices: &'static [(&'static str, &'static str)],
+}
+
+struct ExpectedDevice {
+    id: &'static str,
+    name: &'static str,
+    accepted_at_ms: Option<i64>,
 }
 
 struct ExpectedEntry {
@@ -92,6 +104,8 @@ const VECTORS: &[FormatVector] = &[
             unknown_fields: &[],
             tombstones: &[],
             removed_devices: &[],
+            known_devices: &[],
+            pending_devices: &[],
         },
     },
     FormatVector {
@@ -128,6 +142,8 @@ const VECTORS: &[FormatVector] = &[
             unknown_fields: &[],
             tombstones: &[],
             removed_devices: &[],
+            known_devices: &[],
+            pending_devices: &[],
         },
     },
     FormatVector {
@@ -167,6 +183,8 @@ const VECTORS: &[FormatVector] = &[
             ],
             tombstones: &[],
             removed_devices: &[],
+            known_devices: &[],
+            pending_devices: &[],
         },
     },
     FormatVector {
@@ -223,6 +241,8 @@ const VECTORS: &[FormatVector] = &[
             unknown_fields: &[],
             tombstones: &["c26f08d1eeb73e96d8c9bcc34f51156f"],
             removed_devices: &[],
+            known_devices: &[],
+            pending_devices: &[],
         },
     },
     FormatVector {
@@ -284,6 +304,8 @@ const VECTORS: &[FormatVector] = &[
             unknown_fields: &[],
             tombstones: &[],
             removed_devices: &[],
+            known_devices: &[],
+            pending_devices: &[],
         },
     },
     FormatVector {
@@ -344,6 +366,8 @@ const VECTORS: &[FormatVector] = &[
             unknown_fields: &[],
             tombstones: &[],
             removed_devices: &[],
+            known_devices: &[],
+            pending_devices: &[],
         },
     },
     // Dois dispositivos que fundiram (ticket 09): carimbos nas entradas, nas
@@ -404,6 +428,8 @@ const VECTORS: &[FormatVector] = &[
             unknown_fields: &[],
             tombstones: &["6604a5afc88e92955a6581b73a5b4aa3"],
             removed_devices: &[],
+            known_devices: &[],
+            pending_devices: &[],
         },
     },
     // Réplicas e chaveiro assinados (ticket 10), com a chave de cada
@@ -443,6 +469,8 @@ const VECTORS: &[FormatVector] = &[
             unknown_fields: &[],
             tombstones: &[],
             removed_devices: &["9df2dc81eed85e76bb124438a0e590e4"],
+            known_devices: &[],
+            pending_devices: &[],
         },
     },
     // Chaveiro 1.2, com o id de quem assina no fim (ticket 10): o primeiro
@@ -482,6 +510,61 @@ const VECTORS: &[FormatVector] = &[
             unknown_fields: &[],
             tombstones: &[],
             removed_devices: &["708041a140cd62167f6a55fe8ec24e62"],
+            known_devices: &[],
+            pending_devices: &[],
+        },
+    },
+    // Dispositivos com nome e data de aceitação, e um pendente (ticket 11):
+    // o primeiro deu-se um nome; o segundo deu-se um nome e foi aceite pelo
+    // primeiro uma hora depois; o terceiro deu-se um nome e ficou pendente. O
+    // vetor descreve o primeiro.
+    FormatVector {
+        path: "v1.2/with-devices",
+        master_password: "vetor de teste v1.2",
+        expected: ExpectedState {
+            vault_id: "414c8b57f13c0c849d5a2edc74457c1d",
+            device_id: "a931f24547a6a0fcb6fee362e7f69c83",
+            created_at_ms: 1_767_225_600_000,
+            entries: &[
+                ExpectedEntry {
+                    id: "9e15333495af6e55409ac80335639cfe",
+                    title: "exemplo.pt",
+                    url: "https://www.exemplo.pt/entrar",
+                    username: "utilizador@exemplo.pt",
+                    password: "vetor: palavra-passe 2",
+                    notes: "",
+                    state: EntryState::Active,
+                    history: &[],
+                    generator: DEFAULT_GENERATOR,
+                },
+                ExpectedEntry {
+                    id: "dabc1e9ee97c81af224507e28863ac8f",
+                    title: "GitHub",
+                    url: "https://github.com/login",
+                    username: "andre",
+                    password: "vetor: palavra-passe 1",
+                    notes: "vetor: notas 1",
+                    state: EntryState::Active,
+                    history: &[],
+                    generator: DEFAULT_GENERATOR,
+                },
+            ],
+            unknown_fields: &[],
+            tombstones: &[],
+            removed_devices: &[],
+            known_devices: &[
+                ExpectedDevice {
+                    id: "23c5677b1a51ef217aa391f7b9fc105b",
+                    name: "Portátil",
+                    accepted_at_ms: Some(1_767_229_200_000),
+                },
+                ExpectedDevice {
+                    id: "a931f24547a6a0fcb6fee362e7f69c83",
+                    name: "Secretária",
+                    accepted_at_ms: Some(1_767_225_600_000),
+                },
+            ],
+            pending_devices: &[("2e0b0061f59355a8adee36d17795d5b6", "Computador da sala")],
         },
     },
 ];
@@ -660,6 +743,42 @@ fn the_replicas_of_removed_devices_in_every_format_vector_stay_out_of_the_merge(
                 "{path}: réplica do dispositivo removido {removed}"
             );
         }
+    }
+}
+
+#[test]
+fn the_known_and_pending_devices_of_every_format_vector_are_read() {
+    for vector in VECTORS {
+        let path = vector.path;
+        let (folder, local) = load(vector);
+        let vault = unlock(&folder, &local, vector)
+            .unwrap_or_else(|error| panic!("{path}: desbloquear: {error}"));
+
+        let known = vault.known_devices().unwrap();
+        for expected in vector.expected.known_devices {
+            let id = expected.id;
+            let device = known.iter().find(|device| device.device_id == id);
+            let device = device.unwrap_or_else(|| panic!("{path}: dispositivo {id}"));
+            assert_eq!(device.name, expected.name, "{path}: nome de {id}");
+            assert_eq!(
+                device.accepted_at_ms, expected.accepted_at_ms,
+                "{path}: data de aceitação de {id}"
+            );
+            assert!(!device.removed, "{path}: {id} não está removido");
+        }
+        let pending: Vec<(String, String)> = vault
+            .pending_devices()
+            .unwrap()
+            .into_iter()
+            .map(|device| (device.device_id, device.name))
+            .collect();
+        let expected: Vec<(String, String)> = vector
+            .expected
+            .pending_devices
+            .iter()
+            .map(|(id, name)| (id.to_string(), name.to_string()))
+            .collect();
+        assert_eq!(pending, expected, "{path}: dispositivos pendentes");
     }
 }
 

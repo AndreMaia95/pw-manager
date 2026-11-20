@@ -6,16 +6,20 @@
 //! sobre pastas do cofre separadas fundem as réplicas desses três por ordens
 //! diferentes. Um observador não edita nada, por isso a sua réplica é só a
 //! fusão do que viu: o corpo decifrado tem de ser igual, byte a byte, seja qual
-//! for a ordem e quantas vezes cada réplica entrou. A única diferença é que
-//! cada observador se regista a si próprio na lista de dispositivos
-//! conhecidos, e os que fundem a réplica de outro observador ficam a
-//! conhecê-lo: a comparação deixa de fora os observadores.
+//! for a ordem e quantas vezes cada réplica entrou.
+//!
+//! Desde a quarentena (ticket 11), só entram réplicas de dispositivos
+//! aceites. Por isso o cofre é criado por um dispositivo raiz, que não edita
+//! nada e aceita os três e dois observadores; cada observador desbloqueia
+//! sobre uma pasta com o chaveiro, a réplica da raiz e a sua, sem entradas,
+//! e funde a da raiz em todas as fusões. A comparação deixa de fora da lista
+//! de dispositivos conhecidos a raiz e os observadores.
 
 mod common;
 
 use std::sync::Arc;
 
-use common::{PASSWORD, START_MS, TestEnv};
+use common::{PASSWORD, START_MS, TestDevice, TestEnv};
 use proptest::prelude::*;
 use vault_core::testing::{self, ManualClock, MemoryLocalFolder, MemoryVaultFolder};
 use vault_core::{EntryChanges, EntryFields, SecretField, Vault};
@@ -99,22 +103,36 @@ impl Op {
 }
 
 /// Os três dispositivos depois de `ops`: a pasta do cofre partilhada, com o
-/// chaveiro e as três réplicas, e os dispositivos.
+/// chaveiro e as réplicas, os dispositivos e os dois observadores.
 struct Edited {
     env: TestEnv,
-    devices: Vec<(common::TestDevice, Vault)>,
+    devices: Vec<(TestDevice, Vault)>,
+    observers: [ObserverDevice; 2],
+}
+
+/// Um observador aceite pela raiz: o seu id e a sua pasta local.
+struct ObserverDevice {
+    device_id: String,
+    local: MemoryLocalFolder,
 }
 
 fn run(ops: &[(Op, i64)]) -> Edited {
     let env = TestEnv::new();
-    let first = env.device();
-    let vault = first.create_vault(PASSWORD);
-    let mut devices = vec![(first, vault)];
-    for _ in 1..DEVICES {
+    let root = env.device().create_vault(PASSWORD);
+    let mut devices = Vec::new();
+    for _ in 0..DEVICES {
         let device = env.device();
-        let vault = device.join_vault(PASSWORD);
+        let vault = device.join_vault_accepted_by(PASSWORD, &root);
         devices.push((device, vault));
     }
+    let observers = [(); 2].map(|_| {
+        let device = env.device();
+        let vault = device.join_vault_accepted_by(PASSWORD, &root);
+        ObserverDevice {
+            device_id: vault.device_id(),
+            local: device.local,
+        }
+    });
     let mut ids: Vec<String> = Vec::new();
     for (n, (op, elapsed_ms)) in ops.iter().enumerate() {
         let pick = |entry: usize| ids.get(entry % ids.len().max(1)).cloned();
@@ -171,7 +189,11 @@ fn run(ops: &[(Op, i64)]) -> Edited {
             Op::Clock(d, ms) => devices[d].0.clock.advance(ms),
         }
     }
-    Edited { env, devices }
+    Edited {
+        env,
+        devices,
+        observers,
+    }
 }
 
 impl Edited {
@@ -182,8 +204,37 @@ impl Edited {
         Replica { device_id, bytes }
     }
 
-    fn keyring(&self) -> Vec<u8> {
-        self.env.folder.keyring().unwrap()
+    /// O observador `o`, numa pasta do cofre só sua com o chaveiro, a
+    /// réplica da raiz e a dele, que funde as `replicas` uma a uma.
+    fn observer(&self, o: usize, replicas: &[&Replica]) -> Observer {
+        let folder = MemoryVaultFolder::new();
+        folder.put_keyring(self.env.folder.keyring().unwrap());
+        let observer = &self.observers[o];
+        for device_id in [&self.root_id(), &observer.device_id] {
+            folder.put_replica(device_id, self.env.folder.replica(device_id).unwrap());
+        }
+        let vault = Vault::open(
+            Arc::new(folder.clone()),
+            Arc::new(observer.local.clone()),
+            Arc::new(ManualClock::new(OBSERVED_AT_MS)),
+            &observer.device_id,
+        )
+        .unwrap();
+        vault.unlock_with_master_password(PASSWORD).unwrap();
+        let observer = Observer { folder, vault };
+        for replica in replicas {
+            observer.merge_in(replica);
+        }
+        observer
+    }
+
+    /// O id da raiz, que criou o cofre e não edita nada.
+    fn root_id(&self) -> String {
+        let mut others = self.device_ids();
+        others.extend(self.observers.iter().map(|o| o.device_id.clone()));
+        let replicas = self.env.folder.replica_device_ids();
+        let root = replicas.into_iter().find(|id| !others.contains(id));
+        root.expect("a réplica da raiz")
     }
 
     /// Os ids dos dispositivos que editaram.
@@ -201,37 +252,14 @@ struct Replica {
     bytes: Vec<u8>,
 }
 
-/// Um dispositivo que se junta a uma pasta do cofre só com as réplicas que
-/// lhe são dadas, e não edita nada.
+/// Um observador desbloqueado sobre uma pasta do cofre só com as réplicas
+/// que lhe são dadas. Não edita nada.
 struct Observer {
     folder: MemoryVaultFolder,
     vault: Vault,
 }
 
 impl Observer {
-    fn join(keyring: &[u8], first: &Replica) -> Self {
-        let folder = MemoryVaultFolder::new();
-        folder.put_keyring(keyring.to_vec());
-        folder.put_replica(&first.device_id, first.bytes.clone());
-        let vault = Vault::join(
-            Arc::new(folder.clone()),
-            Arc::new(MemoryLocalFolder::new()),
-            Arc::new(ManualClock::new(OBSERVED_AT_MS)),
-            PASSWORD,
-        )
-        .unwrap();
-        Self { folder, vault }
-    }
-
-    /// Junta-se com a primeira réplica e funde as outras uma a uma.
-    fn merging(keyring: &[u8], replicas: &[&Replica]) -> Self {
-        let observer = Self::join(keyring, replicas[0]);
-        for replica in &replicas[1..] {
-            observer.merge_in(replica);
-        }
-        observer
-    }
-
     fn merge_in(&self, replica: &Replica) {
         self.folder
             .put_replica(&replica.device_id, replica.bytes.clone());
@@ -247,7 +275,7 @@ impl Observer {
 
     /// O corpo decifrado da réplica do observador: o estado que fundiu, só
     /// com os dispositivos `devices` (os que editaram) na lista de
-    /// dispositivos conhecidos.
+    /// dispositivos conhecidos, sem a raiz nem os observadores.
     fn body(&self, devices: &[String]) -> Vec<u8> {
         let body = testing::open_replica(&self.folder, &self.vault.device_id(), PASSWORD)
             .unwrap()
@@ -294,10 +322,9 @@ proptest! {
     fn merging_is_commutative(ops in ops()) {
         let edited = run(&ops);
         let (a, b) = (edited.replica(0), edited.replica(1));
-        let keyring = edited.keyring();
 
-        let ab = Observer::merging(&keyring, &[&a, &b]);
-        let ba = Observer::merging(&keyring, &[&b, &a]);
+        let ab = edited.observer(0, &[&a, &b]);
+        let ba = edited.observer(0, &[&b, &a]);
 
         let devices = edited.device_ids();
         prop_assert_eq!(ab.body(&devices), ba.body(&devices));
@@ -308,11 +335,10 @@ proptest! {
     fn merging_is_associative(ops in ops()) {
         let edited = run(&ops);
         let (a, b, c) = (edited.replica(0), edited.replica(1), edited.replica(2));
-        let keyring = edited.keyring();
 
-        let ab_c = Observer::merging(&keyring, &[&a, &b, &c]);
-        let bc = Observer::merging(&keyring, &[&b, &c]);
-        let a_bc = Observer::merging(&keyring, &[&a, &bc.replica()]);
+        let ab_c = edited.observer(0, &[&a, &b, &c]);
+        let bc = edited.observer(1, &[&b, &c]);
+        let a_bc = edited.observer(0, &[&a, &bc.replica()]);
 
         let devices = edited.device_ids();
         prop_assert_eq!(ab_c.body(&devices), a_bc.body(&devices));
@@ -322,17 +348,16 @@ proptest! {
     fn merging_is_idempotent(ops in ops()) {
         let edited = run(&ops);
         let (a, b) = (edited.replica(0), edited.replica(1));
-        let keyring = edited.keyring();
 
         let devices = edited.device_ids();
-        let ab = Observer::merging(&keyring, &[&a, &b]);
+        let ab = edited.observer(0, &[&a, &b]);
         let merged = ab.body(&devices);
         ab.merge_in(&a);
         ab.merge_in(&b);
         prop_assert_eq!(ab.body(&devices), merged.clone());
 
         // A fusão com o próprio resultado não o muda.
-        let again = Observer::merging(&keyring, &[&ab.replica(), &a, &b]);
+        let again = edited.observer(1, &[&ab.replica(), &a, &b]);
         prop_assert_eq!(again.body(&devices), merged);
     }
 

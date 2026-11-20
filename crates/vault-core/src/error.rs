@@ -34,6 +34,18 @@ pub enum VaultError {
     /// Não há nenhum dispositivo conhecido com este id (ou o id nem é válido).
     #[error("dispositivo não encontrado")]
     DeviceNotFound,
+    /// Só um dispositivo conhecido pode aceitar, recusar ou remover
+    /// dispositivos: este está pendente ou foi removido.
+    #[error("este dispositivo não é um dispositivo conhecido")]
+    ThisDeviceNotKnown,
+    /// A impressão digital confirmada não é a da chave com que o dispositivo
+    /// pendente se descreve agora na pasta do cofre: pode ser outro
+    /// dispositivo a fazer-se passar por ele.
+    #[error("a impressão digital não confere com a do dispositivo pendente")]
+    FingerprintMismatch,
+    /// O dispositivo foi removido, ou recusado: é definitivo.
+    #[error("o dispositivo foi removido")]
+    DeviceRemoved,
     /// Um dispositivo não se pode remover a si próprio.
     #[error("este dispositivo não se pode remover a si próprio")]
     CannotRemoveThisDevice,

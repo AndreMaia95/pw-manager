@@ -275,6 +275,55 @@ fn the_merge_survives_two_device_lists_and_their_mutations() {
     for_each_mutation(&fuzzing::merge_input(&first, &second), fuzzing::merge);
 }
 
+/// Um corpo com um dispositivo conhecido com nome, carimbo do nome e data de
+/// aceitação, e um dispositivo pendente com nome (ticket 11). Pela ordem
+/// canónica (ADR-0008): os campos acrescentados pela chave codificada.
+fn replica_body_with_named_and_pending_devices_seed(name: &str, counter: u32) -> Vec<u8> {
+    let known = map(&[
+        ("id", bytes(&[0x11; 16])),
+        ("name", text(name)),
+        (
+            "name_stamp",
+            stamp(1_000, counter, "33333333333333333333333333333333"),
+        ),
+        ("public_key", bytes(&[0xa1; 32])),
+        ("accepted_at_ms", uint(1_000)),
+    ]);
+    let pending = map(&[
+        ("id", bytes(&[0x22; 16])),
+        ("name", text("Portátil")),
+        ("public_key", bytes(&[0xb2; 32])),
+    ]);
+    map(&[
+        ("created_at_ms", uint(0)),
+        ("devices", array(&[known])),
+        ("pending_devices", array(&[pending])),
+    ])
+}
+
+#[test]
+fn the_replica_body_decoder_survives_a_body_with_named_and_pending_devices_and_its_mutations() {
+    let seed = replica_body_with_named_and_pending_devices_seed("Secretária", 0);
+    assert!(
+        fuzzing::replica_body_is_accepted(&seed),
+        "a semente é válida"
+    );
+    for_each_mutation(&seed, fuzzing::replica_body);
+}
+
+/// Dois nomes do mesmo dispositivo com carimbos diferentes: a fusão não
+/// depende da ordem.
+#[test]
+fn the_merge_survives_two_names_of_a_device_and_their_mutations() {
+    let first = replica_body_with_named_and_pending_devices_seed("Secretária", 0);
+    let second = replica_body_with_named_and_pending_devices_seed("Escritório", 1);
+    assert!(
+        fuzzing::replica_body_is_accepted(&second),
+        "a semente é válida"
+    );
+    for_each_mutation(&fuzzing::merge_input(&first, &second), fuzzing::merge);
+}
+
 #[test]
 fn a_deeply_nested_unknown_value_is_rejected_without_exhausting_the_stack() {
     let deeply_nested = [vec![0x81; 100_000], vec![0x00]].concat();

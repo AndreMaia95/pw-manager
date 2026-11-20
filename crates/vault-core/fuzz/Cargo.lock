@@ -592,6 +592,7 @@ dependencies = [
  "getrandom",
  "serde",
  "serde_bytes",
+ "sha2",
  "thiserror",
  "unicode-normalization",
  "zeroize",

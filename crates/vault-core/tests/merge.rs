@@ -56,7 +56,7 @@ fn a_device_that_joins_sees_the_entries_of_the_vault() {
     let vault_a = a.create_vault(PASSWORD);
     let banco = vault_a.create_entry(entry("Banco")).unwrap();
 
-    let vault_b = b.join_vault(PASSWORD);
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
 
     assert_ne!(vault_b.device_id(), vault_a.device_id());
     assert_eq!(vault_b.vault_id(), vault_a.vault_id());
@@ -72,7 +72,7 @@ fn an_entry_created_on_one_device_appears_on_the_other_after_merging_and_vice_ve
     let env = TestEnv::new();
     let [a, b] = [env.device(), env.device()];
     let vault_a = a.create_vault(PASSWORD);
-    let vault_b = b.join_vault(PASSWORD);
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
 
     vault_a.create_entry(entry("Banco")).unwrap();
     let correio = vault_b.create_entry(entry("Correio")).unwrap();
@@ -92,7 +92,7 @@ fn each_device_only_writes_its_own_replica() {
     let env = TestEnv::new();
     let [a, b] = [env.device(), env.device()];
     let vault_a = a.create_vault(PASSWORD);
-    let vault_b = b.join_vault(PASSWORD);
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
     let replica_a = env.folder.replica(&vault_a.device_id());
 
     vault_b.create_entry(entry("Correio")).unwrap();
@@ -112,7 +112,7 @@ fn of_two_concurrent_edits_the_most_recent_wins_and_the_other_goes_to_the_histor
     let [a, b] = [env.device(), env.device()];
     let vault_a = a.create_vault(PASSWORD);
     let banco = vault_a.create_entry(entry("Banco")).unwrap();
-    let vault_b = b.join_vault(PASSWORD);
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
 
     a.clock.advance(MINUTE_MS);
     set_password(&vault_a, &banco, "editada em A");
@@ -136,7 +136,7 @@ fn a_device_whose_clock_is_ahead_does_not_win_against_a_later_edit() {
     let [a, b] = [env.device(), env.device()];
     let vault_a = a.create_vault(PASSWORD);
     let banco = vault_a.create_entry(entry("Banco")).unwrap();
-    let vault_b = b.join_vault(PASSWORD);
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
 
     // O relógio de A está um ano adiantado quando A edita.
     a.clock.advance(365 * DAY_MS);
@@ -168,7 +168,7 @@ fn the_stamp_never_goes_back_even_if_the_wall_clock_does() {
     let [a, b] = [env.device(), env.device()];
     let vault_a = a.create_vault(PASSWORD);
     let banco = vault_a.create_entry(entry("Banco")).unwrap();
-    let vault_b = b.join_vault(PASSWORD);
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
 
     a.clock.advance(MINUTE_MS);
     set_password(&vault_a, &banco, "primeira edição");
@@ -193,7 +193,7 @@ fn a_device_whose_clock_is_behind_still_wins_with_an_edit_made_after_seeing_anot
     let [a, b] = [env.device(), env.device()];
     let vault_a = a.create_vault(PASSWORD);
     let banco = vault_a.create_entry(entry("Banco")).unwrap();
-    let vault_b = b.join_vault(PASSWORD);
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
 
     a.clock.advance(MINUTE_MS);
     set_password(&vault_a, &banco, "editada em A");
@@ -216,7 +216,7 @@ fn an_entry_deleted_on_one_device_does_not_come_back_when_a_device_offline_for_m
     let vault_a = a.create_vault(PASSWORD);
     let banco = vault_a.create_entry(entry("Banco")).unwrap();
     let correio = vault_a.create_entry(entry("Correio")).unwrap();
-    let vault_b = b.join_vault(PASSWORD);
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
 
     // A apaga uma entrada definitivamente e envia outra para o Lixo, que
     // expira 30 dias depois. B fica seis meses sem fundir.
@@ -254,7 +254,7 @@ fn an_edit_made_after_a_deletion_on_another_device_wins_without_the_deleted_vers
     let [a, b] = [env.device(), env.device()];
     let vault_a = a.create_vault(PASSWORD);
     let banco = vault_a.create_entry(entry("Banco")).unwrap();
-    let vault_b = b.join_vault(PASSWORD);
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
 
     a.clock.advance(MINUTE_MS);
     vault_a.delete_entry_permanently(&banco).unwrap();
@@ -281,7 +281,7 @@ fn an_entry_recovered_from_the_trash_on_another_device_survives_the_expiry() {
     let [a, b] = [env.device(), env.device()];
     let vault_a = a.create_vault(PASSWORD);
     let banco = vault_a.create_entry(entry("Banco")).unwrap();
-    let vault_b = b.join_vault(PASSWORD);
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
 
     a.clock.advance(MINUTE_MS);
     vault_a.delete_entry(&banco).unwrap();
@@ -306,7 +306,7 @@ fn deleting_a_replica_after_it_was_merged_loses_no_data() {
     let [a, b, c] = [env.device(), env.device(), env.device()];
     let vault_a = a.create_vault(PASSWORD);
     vault_a.create_entry(entry("Banco")).unwrap();
-    let vault_b = b.join_vault(PASSWORD);
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
     let correio = vault_b.create_entry(entry("Correio")).unwrap();
     b.clock.advance(MINUTE_MS);
     set_password(&vault_b, &correio, "editada em B");
@@ -316,7 +316,7 @@ fn deleting_a_replica_after_it_was_merged_loses_no_data() {
     vault_a.lock();
     vault_a.unlock_with_master_password(PASSWORD).unwrap();
     vault_a.merge().unwrap();
-    let vault_c = c.join_vault(PASSWORD);
+    let vault_c = c.join_vault_accepted_by(PASSWORD, &vault_a);
 
     for vault in [&vault_a, &vault_c] {
         assert_eq!(titles(vault), ["Banco", "Correio"]);
@@ -334,9 +334,9 @@ fn a_replica_that_cannot_be_read_is_left_out_of_the_merge_and_reported() {
     let [a, b, c] = [env.device(), env.device(), env.device()];
     let vault_a = a.create_vault(PASSWORD);
     vault_a.create_entry(entry("Banco")).unwrap();
-    let vault_b = b.join_vault(PASSWORD);
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
     vault_b.create_entry(entry("Correio")).unwrap();
-    let vault_c = c.join_vault(PASSWORD);
+    let vault_c = c.join_vault_accepted_by(PASSWORD, &vault_a);
     vault_c.create_entry(entry("Loja")).unwrap();
     let (device_b, device_c) = (vault_b.device_id(), vault_c.device_id());
     // A réplica de B foi adulterada (o último byte é da assinatura); a de C
@@ -393,7 +393,7 @@ fn a_merge_writes_out_of_the_replica_an_entry_that_expired_in_memory() {
     let [a, b] = [env.device(), env.device()];
     let vault_a = a.create_vault(PASSWORD);
     let banco = vault_a.create_entry(entry("Banco")).unwrap();
-    b.join_vault(PASSWORD);
+    b.join_vault_accepted_by(PASSWORD, &vault_a);
     vault_a.delete_entry(&banco).unwrap();
     vault_a.merge().unwrap();
 
@@ -416,7 +416,7 @@ fn an_entry_that_expired_in_another_devices_trash_leaves_this_one_even_with_its_
     let [a, b] = [env.device(), env.device()];
     let vault_a = a.create_vault(PASSWORD);
     let banco = vault_a.create_entry(entry("Banco")).unwrap();
-    let vault_b = b.join_vault(PASSWORD);
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
     vault_a.delete_entry(&banco).unwrap();
     vault_b.merge().unwrap();
     assert_eq!(vault_b.list_trash().unwrap().len(), 1);
@@ -455,8 +455,8 @@ fn a_device_whose_stamps_are_more_than_a_day_ahead_is_reported_without_blocking_
     let env = TestEnv::new();
     let [a, b, c] = [env.device(), env.device(), env.device()];
     let vault_a = a.create_vault(PASSWORD);
-    let vault_b = b.join_vault(PASSWORD);
-    let vault_c = c.join_vault(PASSWORD);
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
+    let vault_c = c.join_vault_accepted_by(PASSWORD, &vault_a);
 
     // O relógio de A está dois dias adiantado quando A cria uma entrada.
     a.clock.advance(2 * DAY_MS);
@@ -487,7 +487,7 @@ fn stamps_up_to_a_day_ahead_are_not_reported() {
     let env = TestEnv::new();
     let [a, b] = [env.device(), env.device()];
     let vault_a = a.create_vault(PASSWORD);
-    let vault_b = b.join_vault(PASSWORD);
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
 
     a.clock.advance(DAY_MS);
     vault_a.create_entry(entry("Banco")).unwrap();
