@@ -188,7 +188,7 @@ fn main() -> ExitCode {
                 notes: {:?},
                 state: {state},
                 history: &[{history}],
-                generator: GeneratorSettings::{generator:?},
+                generator: GeneratorSettings::{generator},
             }},"#,
             entry.id,
             entry.title,
@@ -196,9 +196,14 @@ fn main() -> ExitCode {
             entry.username,
             reveal(SecretField::Password),
             reveal(SecretField::Notes),
-            generator = vault
-                .generator_settings(&entry.id)
-                .expect("ler os ajustes do gerador"),
+            // O `Debug` do separador não leva o nome do tipo.
+            generator = format!(
+                "{:?}",
+                vault
+                    .generator_settings(&entry.id)
+                    .expect("ler os ajustes do gerador")
+            )
+            .replace("separator: ", "separator: PassphraseSeparator::"),
         );
     }
     println!(
@@ -331,7 +336,7 @@ fn add_trash_and_history(clock: &ManualClock, vault: &Vault) {
 
 /// Gera a palavra-passe da entrada "GitHub" com ajustes próprios (sem
 /// símbolos, 32 caracteres, com os ambíguos) e uma frase-passe de 6 palavras
-/// para a outra. Ambas ficam com os ajustes guardados.
+/// separadas por pontos para a outra. Ambas ficam com os ajustes guardados.
 fn add_generator_settings(vault: &Vault) {
     for entry in vault.list_entries().expect("listar as entradas") {
         let settings = match entry.title.as_str() {
@@ -343,7 +348,7 @@ fn add_generator_settings(vault: &Vault) {
                 symbols: false,
                 exclude_ambiguous: false,
             },
-            _ => GeneratorSettings::Passphrase { word_count: 6 },
+            _ => GeneratorSettings::default_passphrase(),
         };
         vault
             .generate_password(&entry.id, Some(settings))

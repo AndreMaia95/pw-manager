@@ -55,8 +55,10 @@ dados que os vetores existentes ainda não cobrem (entradas, histórico, lápide
    O id da lápide vai para `tombstones` em `ExpectedState`.
 
    Com `--with-generator-settings` no fim, a entrada "GitHub" leva uma
-   palavra-passe gerada com ajustes próprios e a outra uma frase-passe, ambas
-   com os ajustes do gerador guardados.
+   palavra-passe gerada com ajustes próprios e a outra uma frase-passe com os
+   ajustes de omissão (separada por pontos), ambas com os ajustes do gerador
+   guardados. O vetor `v1.0/with-generator-settings` é anterior à escolha do
+   separador: a sua frase-passe é separada por espaços.
 
    O gerador lê a versão do formato dos bytes que escreveu e põe o vetor em
    `v<principal>.<secundária>/<nome>/`. Recusa-se a escrever sobre uma pasta que

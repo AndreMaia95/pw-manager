@@ -41,8 +41,48 @@ pub enum GeneratorSettings {
         exclude_ambiguous: bool,
     },
     /// Uma frase-passe de `word_count` palavras da lista grande da EFF,
-    /// separadas por espaços (algumas palavras da lista têm hífen).
-    Passphrase { word_count: u32 },
+    /// separadas por `separator`.
+    Passphrase {
+        word_count: u32,
+        separator: PassphraseSeparator,
+    },
+}
+
+/// O que separa as palavras de uma frase-passe.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PassphraseSeparator {
+    /// `.`: nenhuma palavra da lista o tem, e a maioria dos sites aceita-o.
+    #[default]
+    Dot,
+    /// `-`: algumas palavras da lista também têm hífen (`t-shirt`).
+    Hyphen,
+    /// `_`.
+    Underscore,
+    /// ` `: alguns sites não aceitam espaços.
+    Space,
+}
+
+impl PassphraseSeparator {
+    const ALL: [Self; 4] = [Self::Dot, Self::Hyphen, Self::Underscore, Self::Space];
+
+    fn as_char(self) -> char {
+        match self {
+            Self::Dot => '.',
+            Self::Hyphen => '-',
+            Self::Underscore => '_',
+            Self::Space => ' ',
+        }
+    }
+
+    /// O separador escrito como `text` nos ajustes guardados. O espaço nunca é
+    /// escrito (é o separador quando o campo falta): escrito, voltaria a ser
+    /// escrito sem o campo, com outros bytes.
+    fn from_text(text: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .filter(|separator| *separator != Self::Space)
+            .find(|separator| text.chars().eq([separator.as_char()]))
+    }
 }
 
 impl Default for GeneratorSettings {
@@ -61,9 +101,13 @@ impl Default for GeneratorSettings {
 }
 
 impl GeneratorSettings {
-    /// Uma frase-passe de 6 palavras da lista grande da EFF.
+    /// Uma frase-passe de 6 palavras da lista grande da EFF, separadas por
+    /// pontos.
     pub fn default_passphrase() -> Self {
-        Self::Passphrase { word_count: 6 }
+        Self::Passphrase {
+            word_count: 6,
+            separator: PassphraseSeparator::default(),
+        }
     }
 
     /// Se é possível gerar com estes ajustes: pelo menos uma classe ativa,
@@ -86,7 +130,7 @@ impl GeneratorSettings {
                     .count() as u32;
                 classes > 0 && (classes..=MAX_LENGTH).contains(length)
             }
-            Self::Passphrase { word_count } => (1..=MAX_WORDS).contains(word_count),
+            Self::Passphrase { word_count, .. } => (1..=MAX_WORDS).contains(word_count),
         }
     }
 }
@@ -149,9 +193,18 @@ impl StoredSettings {
                 map.added("symbols", symbols);
                 map.added("exclude_ambiguous", exclude_ambiguous);
             }
-            GeneratorSettings::Passphrase { word_count } => {
+            GeneratorSettings::Passphrase {
+                word_count,
+                separator,
+            } => {
                 map.added("kind", PASSPHRASE);
                 map.added("word_count", word_count);
+                // O espaço é o separador dos ajustes escritos antes de haver
+                // escolha, que não têm este campo: assim voltam a ser escritos
+                // com os mesmos bytes.
+                if *separator != PassphraseSeparator::Space {
+                    map.added("separator", &separator.as_char().to_string());
+                }
             }
         }
         map.unknown(unknown);
@@ -182,6 +235,12 @@ impl StoredSettings {
             },
             PASSPHRASE => GeneratorSettings::Passphrase {
                 word_count: cbor::decode_value(map.take("word_count")?)?,
+                separator: match map.take("separator") {
+                    Some(item) => {
+                        PassphraseSeparator::from_text(&cbor::decode_value::<String>(item)?)?
+                    }
+                    None => PassphraseSeparator::Space,
+                },
             },
             _ => return None,
         };
@@ -232,12 +291,19 @@ pub(crate) fn generate(settings: &GeneratorSettings) -> Result<Zeroizing<String>
             .collect();
             random_password(*length as usize, &classes)
         }
-        GeneratorSettings::Passphrase { word_count } => passphrase(*word_count as usize),
+        GeneratorSettings::Passphrase {
+            word_count,
+            separator,
+        } => passphrase(*word_count as usize, *separator),
     }
 }
 
-/// `word_count` palavras da lista grande da EFF, escolhidas uniformemente.
-fn passphrase(word_count: usize) -> Result<Zeroizing<String>, VaultError> {
+/// `word_count` palavras da lista grande da EFF, escolhidas uniformemente e
+/// separadas por `separator`.
+fn passphrase(
+    word_count: usize,
+    separator: PassphraseSeparator,
+) -> Result<Zeroizing<String>, VaultError> {
     let words = &*EFF_WORDS;
     // Com a capacidade toda reservada, a frase não é copiada ao crescer, o que
     // deixaria cópias por apagar na memória.
@@ -249,7 +315,7 @@ fn passphrase(word_count: usize) -> Result<Zeroizing<String>, VaultError> {
     let mut phrase = Zeroizing::new(String::with_capacity(word_count * (longest + 1)));
     for i in 0..word_count {
         if i > 0 {
-            phrase.push(' ');
+            phrase.push(separator.as_char());
         }
         phrase.push_str(words[random_below(words.len())?]);
     }
@@ -447,10 +513,10 @@ mod tests {
             .collect();
 
         let mut counts = [0usize; 6];
-        let settings = GeneratorSettings::Passphrase { word_count: 6 };
+        let settings = GeneratorSettings::default_passphrase();
         for _ in 0..SAMPLES {
             let phrase = generate(&settings).unwrap();
-            for word in phrase.split(' ') {
+            for word in phrase.split('.') {
                 counts[first_die[word]] += 1;
             }
         }

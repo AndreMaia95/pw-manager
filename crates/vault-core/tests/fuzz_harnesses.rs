@@ -93,7 +93,11 @@ fn replica_body_with_generator_settings_seed() -> Vec<u8> {
         ("min_digits", uint(2)),
         ("exclude_ambiguous", b"\xf4".to_vec()),
     ]);
-    let passphrase = map(&[("kind", text("passphrase")), ("word_count", uint(6))]);
+    let passphrase = map(&[
+        ("kind", text("passphrase")),
+        ("separator", text(".")),
+        ("word_count", uint(6)),
+    ]);
     map(&[
         ("created_at_ms", uint(0)),
         (

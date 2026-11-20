@@ -6,7 +6,9 @@ mod common;
 use common::cbor::{array, bytes, map, text, uint};
 use common::{PASSWORD, START_MS, TestDevice, TestEnv};
 use vault_core::testing;
-use vault_core::{EntryFields, GeneratorSettings, SecretField, Vault, VaultError};
+use vault_core::{
+    EntryFields, GeneratorSettings, PassphraseSeparator, SecretField, Vault, VaultError,
+};
 
 const AMBIGUOUS: &str = "0O1lI";
 
@@ -24,6 +26,20 @@ fn new_vault() -> (TestDevice, Vault) {
     let device = TestEnv::new().device();
     let vault = device.create_vault(PASSWORD);
     (device, vault)
+}
+
+fn passphrase(word_count: u32, separator: PassphraseSeparator) -> GeneratorSettings {
+    GeneratorSettings::Passphrase {
+        word_count,
+        separator,
+    }
+}
+
+fn eff_words() -> Vec<&'static str> {
+    include_str!("../src/eff_large_wordlist.txt")
+        .lines()
+        .map(|line| line.split('\t').nth(1).unwrap())
+        .collect()
 }
 
 fn password(vault: &Vault, id: &str) -> String {
@@ -94,29 +110,61 @@ fn the_settings_stay_in_the_entry_and_are_reused_when_generating_again() {
 }
 
 #[test]
-fn a_passphrase_has_6_words_from_the_eff_large_wordlist() {
-    let eff_words: Vec<&str> = include_str!("../src/eff_large_wordlist.txt")
-        .lines()
-        .map(|line| line.split('\t').nth(1).unwrap())
-        .collect();
+fn a_passphrase_has_6_words_from_the_eff_large_wordlist_separated_by_dots() {
     let (_device, vault) = new_vault();
     let id = vault.create_entry(github()).unwrap();
 
-    let passphrase = GeneratorSettings::Passphrase { word_count: 6 };
+    let settings = GeneratorSettings::default_passphrase();
+    assert_eq!(settings, passphrase(6, PassphraseSeparator::Dot));
     vault
-        .generate_password(&id, Some(passphrase.clone()))
+        .generate_password(&id, Some(settings.clone()))
         .unwrap();
 
     let generated = password(&vault, &id);
-    let words: Vec<&str> = generated.split(' ').collect();
+    let words: Vec<&str> = generated.split('.').collect();
     assert_eq!(words.len(), 6, "{generated}");
     assert!(
-        words.iter().all(|word| eff_words.contains(word)),
+        words.iter().all(|word| eff_words().contains(word)),
         "{generated}"
     );
     vault.lock();
     vault.unlock_with_master_password(PASSWORD).unwrap();
-    assert_eq!(vault.generator_settings(&id).unwrap(), passphrase);
+    assert_eq!(vault.generator_settings(&id).unwrap(), settings);
+}
+
+#[test]
+fn the_separator_is_chosen_per_entry_and_stays_in_it() {
+    let (_device, vault) = new_vault();
+    let eff_words = eff_words();
+
+    for (separator, text) in [
+        (PassphraseSeparator::Dot, '.'),
+        (PassphraseSeparator::Hyphen, '-'),
+        (PassphraseSeparator::Underscore, '_'),
+        (PassphraseSeparator::Space, ' '),
+    ] {
+        let id = vault.create_entry(github()).unwrap();
+        vault
+            .generate_password(&id, Some(passphrase(4, separator)))
+            .unwrap();
+        vault.lock();
+        vault.unlock_with_master_password(PASSWORD).unwrap();
+        vault.generate_password(&id, None).unwrap();
+
+        let generated = password(&vault, &id);
+        // Algumas palavras da lista têm hífen (`t-shirt`): com o hífen como
+        // separador, a frase pode ter mais de 3 hífenes.
+        let words: Vec<&str> = generated.split(text).collect();
+        assert!(words.len() >= 4, "{separator:?}: {generated}");
+        if separator != PassphraseSeparator::Hyphen {
+            assert_eq!(words.len(), 4, "{separator:?}: {generated}");
+            assert!(words.iter().all(|word| eff_words.contains(word)));
+        }
+        assert_eq!(
+            vault.generator_settings(&id).unwrap(),
+            passphrase(4, separator)
+        );
+    }
 }
 
 #[test]
@@ -138,8 +186,8 @@ fn invalid_settings_are_refused_and_leave_the_entry_as_it_was() {
         shorter_than_its_classes,
         digits_only(0),
         digits_only(129),
-        GeneratorSettings::Passphrase { word_count: 0 },
-        GeneratorSettings::Passphrase { word_count: 21 },
+        passphrase(0, PassphraseSeparator::Dot),
+        passphrase(21, PassphraseSeparator::Dot),
     ] {
         assert_eq!(
             vault.generate_password(&id, Some(invalid.clone())),
@@ -166,8 +214,8 @@ fn the_limits_are_valid() {
         (four_classes_in_four_characters, Some(4)),
         (digits_only(1), Some(1)),
         (digits_only(128), Some(128)),
-        (GeneratorSettings::Passphrase { word_count: 1 }, None),
-        (GeneratorSettings::Passphrase { word_count: 20 }, None),
+        (passphrase(1, PassphraseSeparator::Space), None),
+        (passphrase(20, PassphraseSeparator::Space), None),
     ] {
         vault.generate_password(&id, Some(settings)).unwrap();
         if let Some(expected_len) = expected_len {
@@ -302,6 +350,35 @@ fn stored_settings_with_an_unknown_field_survive_a_rewrite_byte_for_byte() {
 
 #[test]
 fn stored_passphrase_settings_survive_a_rewrite_byte_for_byte() {
+    for separator in ["-", "_"] {
+        let generator = map(&[
+            ("kind", text("passphrase")),
+            ("separator", text(separator)),
+            ("word_count", uint(8)),
+        ]);
+        let body = body_with_generator(generator);
+        let (env, device_id, vault) = vault_with_body(body.clone());
+        let vault = vault.unwrap();
+
+        let expected = match separator {
+            "-" => PassphraseSeparator::Hyphen,
+            _ => PassphraseSeparator::Underscore,
+        };
+        assert_eq!(
+            vault.generator_settings(ENTRY_ID_HEX).unwrap(),
+            passphrase(8, expected)
+        );
+        vault.save_replica().unwrap();
+        let rewritten = testing::open_replica(&env.folder, &device_id, PASSWORD).unwrap();
+        assert_eq!(rewritten.body, body);
+    }
+}
+
+/// Antes de haver escolha de separador, a frase-passe era separada por
+/// espaços e os ajustes não tinham `separator` (vetor
+/// `v1.0/with-generator-settings`).
+#[test]
+fn a_stored_passphrase_without_a_separator_is_separated_by_spaces() {
     let generator = map(&[("kind", text("passphrase")), ("word_count", uint(8))]);
     let body = body_with_generator(generator);
     let (env, device_id, vault) = vault_with_body(body.clone());
@@ -309,11 +386,14 @@ fn stored_passphrase_settings_survive_a_rewrite_byte_for_byte() {
 
     assert_eq!(
         vault.generator_settings(ENTRY_ID_HEX).unwrap(),
-        GeneratorSettings::Passphrase { word_count: 8 }
+        passphrase(8, PassphraseSeparator::Space)
     );
     vault.save_replica().unwrap();
     let rewritten = testing::open_replica(&env.folder, &device_id, PASSWORD).unwrap();
     assert_eq!(rewritten.body, body);
+
+    vault.generate_password(ENTRY_ID_HEX, None).unwrap();
+    assert_eq!(password(&vault, ENTRY_ID_HEX).split(' ').count(), 8);
 }
 
 #[test]
@@ -360,12 +440,25 @@ fn stored_settings_this_version_cannot_use_are_kept_and_the_defaults_are_used_me
         ("exclude_ambiguous", FALSE.to_vec()),
     ]);
     let length_as_text = map(&[("kind", text("passphrase")), ("word_count", text("6"))]);
+    let separator_this_version_does_not_know = map(&[
+        ("kind", text("passphrase")),
+        ("separator", text("/")),
+        ("word_count", uint(6)),
+    ]);
+    // Esta versão nunca escreve o espaço: é o separador quando o campo falta.
+    let space_written_out = map(&[
+        ("kind", text("passphrase")),
+        ("separator", text(" ")),
+        ("word_count", uint(6)),
+    ]);
 
     for generator in [
         more_words_than_this_version_allows,
         longer_than_this_version_allows,
         without_length,
         length_as_text,
+        separator_this_version_does_not_know,
+        space_written_out,
     ] {
         let body = body_with_generator(generator);
         let (env, device_id, vault) = vault_with_body(body.clone());
@@ -385,12 +478,4 @@ fn stored_settings_this_version_cannot_use_are_kept_and_the_defaults_are_used_me
 fn stored_settings_that_are_not_a_map_are_rejected() {
     let (_env, _device_id, vault) = vault_with_body(body_with_generator(text("password")));
     assert_eq!(vault.err(), Some(VaultError::ReplicaRejected));
-}
-
-#[test]
-fn the_default_passphrase_has_6_words() {
-    assert_eq!(
-        GeneratorSettings::default_passphrase(),
-        GeneratorSettings::Passphrase { word_count: 6 }
-    );
 }

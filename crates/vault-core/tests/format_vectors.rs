@@ -12,7 +12,10 @@ use std::sync::Arc;
 use common::cbor::{bytes, text};
 use common::{from_hex, load_vector, vector_dirs, vectors_root};
 use vault_core::testing::{self, ManualClock, MemoryVaultFolder};
-use vault_core::{EntryChanges, EntryState, GeneratorSettings, SecretField, Vault, VaultError};
+use vault_core::{
+    EntryChanges, EntryState, GeneratorSettings, PassphraseSeparator, SecretField, Vault,
+    VaultError,
+};
 
 struct FormatVector {
     /// Pasta do vetor, relativa a `tests/vectors/`.
@@ -239,7 +242,11 @@ const VECTORS: &[FormatVector] = &[
                         notes: "",
                         replaced_at_ms: 1_767_225_600_000,
                     }],
-                    generator: GeneratorSettings::Passphrase { word_count: 6 },
+                    // Escrito antes de haver escolha de separador: espaços.
+                    generator: GeneratorSettings::Passphrase {
+                        word_count: 6,
+                        separator: PassphraseSeparator::Space,
+                    },
                 },
                 ExpectedEntry {
                     id: "a5221ffbabc9cad74870293ce186dce1",
@@ -247,6 +254,65 @@ const VECTORS: &[FormatVector] = &[
                     url: "https://github.com/login",
                     username: "andre",
                     password: "fvRe0uzDBi1C0TWlIwvfVXRmfRFvlR97",
+                    notes: "vetor: notas 1",
+                    state: EntryState::Active,
+                    history: &[ExpectedVersion {
+                        title: "GitHub",
+                        url: "https://github.com/login",
+                        username: "andre",
+                        password: "vetor: palavra-passe 1",
+                        notes: "vetor: notas 1",
+                        replaced_at_ms: 1_767_225_600_000,
+                    }],
+                    generator: GeneratorSettings::Password {
+                        length: 32,
+                        uppercase: true,
+                        lowercase: true,
+                        digits: true,
+                        symbols: false,
+                        exclude_ambiguous: false,
+                    },
+                },
+            ],
+            unknown_fields: &[],
+            tombstones: &[],
+        },
+    },
+    FormatVector {
+        path: "v1.0/with-passphrase-separator",
+        master_password: "vetor de teste v1.0",
+        expected: ExpectedState {
+            vault_id: "9a6736b2edfa43dca8a8ca68242092a1",
+            device_id: "24cdb8ae1b7fc28b35225dd963cb7291",
+            created_at_ms: 1_767_225_600_000,
+            entries: &[
+                ExpectedEntry {
+                    id: "03ea237d68e6c5193985a7241b0071c6",
+                    title: "exemplo.pt",
+                    url: "https://www.exemplo.pt/entrar",
+                    username: "utilizador@exemplo.pt",
+                    password: "chug.departed.uncaring.whinny.runt.outage",
+                    notes: "",
+                    state: EntryState::Active,
+                    history: &[ExpectedVersion {
+                        title: "exemplo.pt",
+                        url: "https://www.exemplo.pt/entrar",
+                        username: "utilizador@exemplo.pt",
+                        password: "vetor: palavra-passe 2",
+                        notes: "",
+                        replaced_at_ms: 1_767_225_600_000,
+                    }],
+                    generator: GeneratorSettings::Passphrase {
+                        word_count: 6,
+                        separator: PassphraseSeparator::Dot,
+                    },
+                },
+                ExpectedEntry {
+                    id: "e8f277ab0843766d4af7a363695bd7f4",
+                    title: "GitHub",
+                    url: "https://github.com/login",
+                    username: "andre",
+                    password: "o17hdCZES11peSX7uDGxaUJby08Q0Brr",
                     notes: "vetor: notas 1",
                     state: EntryState::Active,
                     history: &[ExpectedVersion {

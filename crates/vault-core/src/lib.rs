@@ -27,7 +27,7 @@ mod vault;
 pub use clock::{Clock, SystemClock};
 pub use entry::{EntryChanges, EntryFields, EntryState, EntrySummary, HistoryVersion, SecretField};
 pub use error::{StorageError, VaultError};
-pub use generator::GeneratorSettings;
+pub use generator::{GeneratorSettings, PassphraseSeparator};
 pub use kdf::KdfParams;
 pub use storage::Storage;
 pub use vault::Vault;
