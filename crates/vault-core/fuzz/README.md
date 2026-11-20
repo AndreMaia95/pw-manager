@@ -7,8 +7,8 @@ pânico ou aceitar o que não devia. As verificações estão em `src/fuzzing.rs
 
 | Alvo | O que recebe | O que verifica |
 | --- | --- | --- |
-| `keyring` | um chaveiro | o cabeçalho aceite é de um chaveiro 1.x e o id do cofre e a geração lidos são os do cabeçalho; não aceita bytes depois do corpo CBOR; o invólucro nunca abre com uma palavra-passe que não o selou |
-| `replica` | uma réplica | sem a chave do cofre nada é aceite; autenticada com a chave do cofre, só é aceite com o cabeçalho do dono (cofre, dispositivo, geração, versão) |
+| `keyring` | um chaveiro | o cabeçalho aceite é de um chaveiro 1.x e o id do cofre e a geração lidos são os do cabeçalho; não aceita bytes depois do corpo CBOR nem da assinatura; a assinatura nunca confere sem a chave privada do autor, nem com um autor que não se conhece; o invólucro nunca abre com uma palavra-passe que não o selou |
+| `replica` | uma réplica | sem a chave do cofre e a chave privada do dispositivo nada entra na fusão, conhecido ou não o dispositivo; cifrada com a chave do cofre e assinada pelo dispositivo, só entra com o cabeçalho do dono (cofre, dispositivo, geração, versão com assinatura) e uma lista de dispositivos que não lhe dê outra chave; assinada com outra chave, nunca entra |
 | `replica_body` | o corpo decifrado de uma réplica, em CBOR | o que aceita volta a ler-se igual depois de escrito; não aceita bytes a mais |
 | `merge` | dois corpos decifrados (o comprimento do primeiro em u16 BE, o primeiro e o segundo) | a fusão de dois corpos aceites não entra em pânico, dá o mesmo pelas duas ordens, dá um corpo que o leitor aceita, e fundi-lo consigo mesmo não o muda |
 

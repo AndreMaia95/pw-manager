@@ -19,3 +19,4 @@
 
 **Nota do ticket 09 (2026-11-20).** `Storage` ganhou `list_replicas()` (os ids dos dispositivos com réplica na pasta), e o núcleo já ignora nomes que não sejam um id de dispositivo, como `cofre (1).vault`. Falta a indicação de descarregada ou não. A fusão é `Vault::merge()`. O desbloqueio continua a ler só a réplica deste dispositivo.
 
+**Nota do ticket 10 (2026-11-20).** Já existe a interface da pasta local, `LocalStorage` (hoje só com a chave do dispositivo; duplo `testing::MemoryLocalFolder`). A cópia local da réplica deve entrar nela, e o adaptador real precisa de a implementar sobre uma pasta da app fora do iCloud.

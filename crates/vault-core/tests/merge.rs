@@ -339,8 +339,9 @@ fn a_replica_that_cannot_be_read_is_left_out_of_the_merge_and_reported() {
     let vault_c = c.join_vault(PASSWORD);
     vault_c.create_entry(entry("Loja")).unwrap();
     let (device_b, device_c) = (vault_b.device_id(), vault_c.device_id());
-    // A réplica de B foi adulterada; a de C é de uma versão principal mais
-    // recente; e há um ficheiro que não é uma réplica.
+    // A réplica de B foi adulterada (o último byte é da assinatura); a de C
+    // é de uma versão principal mais recente; e há um ficheiro que não é uma
+    // réplica.
     let mut tampered = env.folder.replica(&device_b).unwrap();
     *tampered.last_mut().unwrap() ^= 1;
     env.folder.put_replica(&device_b, tampered);
@@ -355,7 +356,7 @@ fn a_replica_that_cannot_be_read_is_left_out_of_the_merge_and_reported() {
     let mut expected = vec![
         SkippedReplica {
             device_id: device_b,
-            reason: SkipReason::Rejected,
+            reason: SkipReason::InvalidSignature,
         },
         SkippedReplica {
             device_id: device_c,

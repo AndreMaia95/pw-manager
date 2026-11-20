@@ -6,7 +6,7 @@ mod common;
 use std::sync::Arc;
 
 use common::{PASSWORD, TestEnv};
-use vault_core::testing;
+use vault_core::testing::{self, MemoryLocalFolder};
 use vault_core::{SystemClock, Vault, VaultError};
 
 #[test]
@@ -18,7 +18,7 @@ fn a_replica_from_a_newer_major_version_asks_for_an_update_and_is_never_written(
     let major = u16::from_be_bytes([replica.header[4], replica.header[5]]);
     replica.header[4..6].copy_from_slice(&(major + 1).to_be_bytes());
     replica.body = "um corpo que esta versão não sabe ler".as_bytes().to_vec();
-    testing::write_replica(&env.folder, &device_id, PASSWORD, replica).unwrap();
+    testing::write_replica(&env.folder, &device.local, &device_id, PASSWORD, replica).unwrap();
     let newer = env.folder.replica(&device_id);
 
     let vault = device.open_vault(&device_id);
@@ -44,6 +44,7 @@ fn a_keyring_from_a_newer_major_version_asks_for_an_update() {
 
     let vault = Vault::open(
         Arc::new(env.folder.clone()),
+        Arc::new(MemoryLocalFolder::new()),
         Arc::new(SystemClock),
         &device_id,
     );

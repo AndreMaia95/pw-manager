@@ -1,5 +1,5 @@
 //! Ambiente de testes: vários dispositivos sobre a mesma pasta do cofre em
-//! memória, cada um com o seu relógio controlável.
+//! memória, cada um com a sua pasta local e o seu relógio controlável.
 
 #![allow(dead_code)]
 
@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use vault_core::testing::{ManualClock, MemoryVaultFolder};
+use vault_core::testing::{ManualClock, MemoryLocalFolder, MemoryVaultFolder};
 use vault_core::{KdfParams, Vault, VaultError};
 
 pub const PASSWORD: &str = "cavalo correto bateria agrafo";
@@ -23,6 +23,8 @@ pub struct TestEnv {
 
 pub struct TestDevice {
     pub folder: MemoryVaultFolder,
+    /// A pasta local deste dispositivo, com a chave do dispositivo.
+    pub local: MemoryLocalFolder,
     pub clock: ManualClock,
 }
 
@@ -33,10 +35,12 @@ impl TestEnv {
         }
     }
 
-    /// Um dispositivo novo sobre a pasta do cofre partilhada, com relógio próprio.
+    /// Um dispositivo novo sobre a pasta do cofre partilhada, com pasta local
+    /// e relógio próprios.
     pub fn device(&self) -> TestDevice {
         TestDevice {
             folder: self.folder.clone(),
+            local: MemoryLocalFolder::new(),
             clock: ManualClock::new(START_MS),
         }
     }
@@ -62,6 +66,7 @@ impl TestDevice {
     ) -> Result<Vault, VaultError> {
         Vault::create(
             Arc::new(self.folder.clone()),
+            Arc::new(self.local.clone()),
             Arc::new(self.clock.clone()),
             password,
             kdf,
@@ -77,16 +82,19 @@ impl TestDevice {
     pub fn try_join_vault(&self, password: &str) -> Result<Vault, VaultError> {
         Vault::join(
             Arc::new(self.folder.clone()),
+            Arc::new(self.local.clone()),
             Arc::new(self.clock.clone()),
             password,
         )
     }
 
-    /// Abre (bloqueado) um cofre existente como o dispositivo `device_id`,
-    /// como acontece quando a app volta a arrancar.
+    /// Abre (bloqueado) um cofre existente como o dispositivo `device_id`, com
+    /// a pasta local deste dispositivo, como acontece quando a app volta a
+    /// arrancar.
     pub fn open_vault(&self, device_id: &str) -> Vault {
         Vault::open(
             Arc::new(self.folder.clone()),
+            Arc::new(self.local.clone()),
             Arc::new(self.clock.clone()),
             device_id,
         )
@@ -125,6 +133,16 @@ pub fn vector_dirs() -> Vec<PathBuf> {
         .iter()
         .flat_map(|version| subdirectories(version))
         .collect()
+}
+
+/// A pasta local do dispositivo `device_id` de um vetor: o ficheiro
+/// `device_keys/<id do dispositivo>`, se existir. Os vetores 1.0 não o têm.
+pub fn load_vector_local_folder(dir: &Path, device_id: &str) -> MemoryLocalFolder {
+    let local = MemoryLocalFolder::new();
+    if let Ok(bytes) = fs::read(dir.join("device_keys").join(device_id)) {
+        local.put_device_key(bytes);
+    }
+    local
 }
 
 /// Carrega a pasta do cofre de um vetor: `keyring` e `replicas/<id do dispositivo>`.

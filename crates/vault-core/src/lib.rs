@@ -7,6 +7,8 @@
 mod cbor;
 mod clock;
 mod crypto;
+mod device_key;
+mod devices;
 mod entry;
 mod error;
 mod format_version;
@@ -32,5 +34,5 @@ pub use error::{StorageError, VaultError};
 pub use generator::{GeneratorSettings, PassphraseSeparator};
 pub use kdf::KdfParams;
 pub use merge::{MergeReport, SkipReason, SkippedReplica};
-pub use storage::Storage;
+pub use storage::{LocalStorage, Storage};
 pub use vault::Vault;

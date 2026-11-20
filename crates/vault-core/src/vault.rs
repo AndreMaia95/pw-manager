@@ -2,6 +2,8 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::crypto::{self, SecretKey};
+use crate::device_key::DeviceKey;
+use crate::devices;
 use crate::entry::{
     Entry, EntryChanges, EntryFields, EntryId, EntrySummary, HistoryVersion, PendingChanges,
     SecretField, VersionId,
@@ -10,15 +12,16 @@ use crate::generator::{self, GeneratorSettings};
 use crate::ids::{DeviceId, Id, VaultId};
 use crate::keyring::Keyring;
 use crate::merge::{MergeReport, SkipReason, SkippedReplica};
-use crate::replica::{self, ReplicaBody, ReplicaOwner};
+use crate::replica::{self, ReplicaBody, ReplicaOwner, SealedReplica};
 use crate::search::Query;
-use crate::{Clock, KdfParams, Storage, VaultError};
+use crate::{Clock, KdfParams, LocalStorage, Storage, VaultError};
 
 const FIRST_GENERATION: u64 = 1;
 
 /// O cofre, visto por este dispositivo.
 pub struct Vault {
     storage: Arc<dyn Storage>,
+    local: Arc<dyn LocalStorage>,
     clock: Arc<dyn Clock>,
     vault_id: VaultId,
     device_id: DeviceId,
@@ -28,6 +31,8 @@ pub struct Vault {
 /// O que só existe enquanto o cofre está desbloqueado.
 struct Session {
     vault_key: SecretKey,
+    /// A chave deste dispositivo, que assina a sua réplica.
+    device_key: DeviceKey,
     generation: u64,
     body: ReplicaBody,
     /// O estado em memória mudou sem a réplica ser escrita: uma entrada
@@ -39,11 +44,15 @@ struct Session {
 impl Vault {
     /// Cria um cofre vazio na pasta do cofre e devolve-o desbloqueado.
     ///
-    /// Escreve o chaveiro, com a chave do cofre embrulhada pela palavra-passe
-    /// mestra, e a réplica deste dispositivo. Em produção, `kdf` vem de
-    /// [`KdfParams::calibrated`], medido neste computador no momento da criação.
+    /// Gera a chave deste dispositivo e guarda-a na pasta local. Escreve o
+    /// chaveiro, com a chave do cofre embrulhada pela palavra-passe mestra e
+    /// assinado por este dispositivo, e a réplica deste dispositivo, que o
+    /// regista como o primeiro dispositivo conhecido. Em produção, `kdf` vem
+    /// de [`KdfParams::calibrated`], medido neste computador no momento da
+    /// criação.
     pub fn create(
         storage: Arc<dyn Storage>,
+        local: Arc<dyn LocalStorage>,
         clock: Arc<dyn Clock>,
         master_password: &str,
         kdf: KdfParams,
@@ -62,26 +71,37 @@ impl Vault {
         let vault_id = Id::random()?;
         let device_id = Id::random()?;
         let vault_key = crypto::random_key()?;
+        let device_key = DeviceKey::generate()?;
         let keyring = Keyring::seal(
             vault_id,
             device_id,
+            &device_key,
             FIRST_GENERATION,
             &vault_key,
             master_password,
             kdf,
         )?;
+        let owner = ReplicaOwner {
+            vault_id,
+            device_id,
+            generation: FIRST_GENERATION,
+        };
+        local.write_device_key(device_key.seal(&owner, &vault_key)?)?;
         storage.write_keyring(keyring)?;
 
-        let created_at_ms = clock.now_ms();
+        let mut body = ReplicaBody::empty(clock.now_ms());
+        body.register_device(device_id, device_key.public_key());
         let vault = Self {
             storage,
+            local,
             clock,
             vault_id,
             device_id,
             session: Mutex::new(Some(Session {
                 vault_key,
+                device_key,
                 generation: FIRST_GENERATION,
-                body: ReplicaBody::empty(created_at_ms),
+                body,
                 unsaved: true,
             })),
         };
@@ -91,16 +111,26 @@ impl Vault {
 
     /// Junta este dispositivo ao cofre que já está na pasta do cofre, com um id
     /// de dispositivo próprio: desembrulha a chave do cofre com a palavra-passe
-    /// mestra, funde as réplicas de todos os outros dispositivos e escreve a
-    /// sua própria réplica. Devolve o cofre desbloqueado.
+    /// mestra, funde as réplicas dos outros dispositivos, gera a chave deste
+    /// dispositivo (que fica na pasta local) e escreve a sua réplica, que o
+    /// regista na lista de dispositivos conhecidos. Devolve o cofre
+    /// desbloqueado.
+    ///
+    /// Só entram as réplicas que [`Vault::merge`] aceita. Como este
+    /// dispositivo ainda não conhece nenhum, a primeira a entrar é a do
+    /// dispositivo que escreveu o chaveiro, e as dos dispositivos que essa
+    /// regista têm de estar assinadas pelas chaves que ela lhes dá. O chaveiro
+    /// tem de estar assinado por um dispositivo conhecido das réplicas que
+    /// entraram; se não estiver, dá [`VaultError::KeyringRejected`] sem
+    /// escrever nada.
     ///
     /// Uma réplica de uma versão principal do formato mais recente dá
     /// [`VaultError::UpdateRequired`], sem escrever nada: esta app não sabe ler
-    /// o cofre todo (ADR-0008). Uma réplica rejeitada fica de fora, como em
-    /// [`Vault::merge`]. Nesta versão o dispositivo entra sem ter de ser aceite
-    /// e sem assinaturas (tickets 10 e 11).
+    /// o cofre todo (ADR-0008). Nesta versão o dispositivo entra sem ter de ser
+    /// aceite (ticket 11).
     pub fn join(
         storage: Arc<dyn Storage>,
+        local: Arc<dyn LocalStorage>,
         clock: Arc<dyn Clock>,
         master_password: &str,
     ) -> Result<Self, VaultError> {
@@ -108,29 +138,36 @@ impl Vault {
         let vault_key = keyring.open_master_password_envelope(master_password)?;
         let vault = Self {
             storage,
+            local,
             clock,
             vault_id: keyring.vault_id(),
             device_id: Id::random()?,
             session: Mutex::new(None),
         };
         let generation = keyring.generation();
-        let (others, skipped) = vault.read_other_replicas(&vault_key, generation)?;
-        if skipped
+        let merged =
+            vault.merge_other_replicas(&vault_key, generation, None, Some(keyring.writer()))?;
+        if merged
+            .skipped
             .iter()
             .any(|replica| replica.reason == SkipReason::UpdateRequired)
         {
             return Err(VaultError::UpdateRequired);
         }
-        let mut others = others.into_iter();
-        // Um cofre sem nenhuma réplica legível começa vazio, criado agora.
-        let mut body = others
-            .next()
+        // Um cofre sem nenhuma réplica que entre começa vazio, criado agora;
+        // mas então ninguém conhece quem escreveu o chaveiro.
+        let mut body = merged
+            .body
             .unwrap_or_else(|| ReplicaBody::empty(vault.clock.now_ms()));
-        for other in others {
-            body.merge(other);
-        }
+        keyring.verify(|id| devices::public_key(&body.devices, id))?;
+        let device_key = DeviceKey::generate()?;
+        body.register_device(vault.device_id, device_key.public_key());
+        vault
+            .local
+            .write_device_key(device_key.seal(&vault.owner(generation), &vault_key)?)?;
         *vault.session() = Some(Session {
             vault_key,
+            device_key,
             generation,
             body,
             unsaved: true,
@@ -142,6 +179,7 @@ impl Vault {
     /// Abre, bloqueado, o cofre da pasta do cofre como o dispositivo `device_id`.
     pub fn open(
         storage: Arc<dyn Storage>,
+        local: Arc<dyn LocalStorage>,
         clock: Arc<dyn Clock>,
         device_id: &str,
     ) -> Result<Self, VaultError> {
@@ -149,6 +187,7 @@ impl Vault {
         let keyring = read_keyring(storage.as_ref())?;
         Ok(Self {
             storage,
+            local,
             clock,
             vault_id: keyring.vault_id(),
             device_id,
@@ -157,23 +196,56 @@ impl Vault {
     }
 
     /// Desbloqueia com a palavra-passe mestra: desembrulha a chave do cofre do
-    /// chaveiro e lê a réplica deste dispositivo.
+    /// chaveiro, lê a chave deste dispositivo da pasta local e a réplica deste
+    /// dispositivo, que tem de estar assinada por ela. O chaveiro tem de estar
+    /// assinado por este dispositivo ou por um que a réplica regista como
+    /// conhecido.
+    ///
+    /// Um dispositivo de antes das assinaturas (só os vetores de teste 1.0)
+    /// não tem chave na pasta local e tem uma réplica 1.0, sem assinatura: é
+    /// migrado aqui (ver `Vault::migrate_to_signatures`).
     pub fn unlock_with_master_password(&self, master_password: &str) -> Result<(), VaultError> {
         let keyring = read_keyring(self.storage.as_ref())?;
         if keyring.vault_id() != self.vault_id {
             return Err(VaultError::KeyringRejected);
         }
         let vault_key = keyring.open_master_password_envelope(master_password)?;
+        let owner = self.owner(keyring.generation());
         let bytes = self
             .storage
             .read_replica(self.device_id())?
             .ok_or(VaultError::ReplicaNotFound)?;
-        let body = replica::open(&bytes, &self.owner(keyring.generation()), &vault_key)?;
-        let mut session = Session {
-            vault_key,
-            generation: keyring.generation(),
-            body,
-            unsaved: false,
+        let sealed = SealedReplica::parse(&bytes)?;
+        if !sealed.belongs_to(&owner) {
+            return Err(VaultError::ReplicaRejected);
+        }
+        let mut session = match self.local.read_device_key()? {
+            Some(file) => {
+                let (key_owner, device_key) = DeviceKey::open(&file, &vault_key)?;
+                if key_owner != owner {
+                    return Err(VaultError::DeviceKeyRejected);
+                }
+                if !sealed.is_signed_by(&device_key.public_key()) {
+                    return Err(VaultError::ReplicaRejected);
+                }
+                let body = sealed.open(&vault_key)?;
+                // Este dispositivo conhece a sua chave mesmo que a lista não a
+                // tenha.
+                let own_key = device_key.public_key();
+                keyring.verify(|id| match id == self.device_id {
+                    true => Some(own_key),
+                    false => devices::public_key(&body.devices, id),
+                })?;
+                Session {
+                    vault_key,
+                    device_key,
+                    generation: keyring.generation(),
+                    body,
+                    unsaved: false,
+                }
+            }
+            None if sealed.is_signed() => return Err(VaultError::DeviceKeyNotFound),
+            None => self.migrate_to_signatures(&keyring, &sealed, vault_key, master_password)?,
         };
         if session.body.expire_trash(self.clock.now_ms()) {
             // As entradas que expiraram no Lixo saem já da réplica. Se a
@@ -183,6 +255,63 @@ impl Vault {
         }
         *self.session() = Some(session);
         Ok(())
+    }
+
+    /// Migra um dispositivo de antes das assinaturas, cuja réplica 1.0 não é
+    /// assinada (ticket 10). Só existem nos vetores de teste 1.0: nenhum cofre
+    /// desses chegou a ter dados reais.
+    ///
+    /// Só migra se o chaveiro também for 1.0: um cofre de antes das
+    /// assinaturas. Com um chaveiro assinado, a réplica 1.0 foi posta no lugar
+    /// da deste dispositivo, que perdeu a sua chave, e dá
+    /// [`VaultError::DeviceKeyNotFound`]. Um chaveiro 1.0 não se forja sem a
+    /// palavra-passe mestra, porque o invólucro está ligado ao cabeçalho com a
+    /// versão do formato.
+    ///
+    /// O dispositivo gera a sua chave, regista-se como dispositivo conhecido,
+    /// guarda a chave na pasta local e escreve a sua réplica assinada e o
+    /// chaveiro assinado, com um invólucro novo da mesma palavra-passe mestra
+    /// e da mesma geração. Num cofre 1.0 com vários dispositivos, só o
+    /// primeiro a desbloquear migra, e os outros juntam-se de novo. Se uma
+    /// escrita falhar a meio, o dispositivo também tem de se juntar de novo.
+    fn migrate_to_signatures(
+        &self,
+        keyring: &Keyring,
+        sealed: &SealedReplica,
+        vault_key: SecretKey,
+        master_password: &str,
+    ) -> Result<Session, VaultError> {
+        if keyring.is_signed() {
+            return Err(VaultError::DeviceKeyNotFound);
+        }
+        let mut body = sealed.open(&vault_key)?;
+        let generation = keyring.generation();
+        let device_key = DeviceKey::generate()?;
+        body.register_device(self.device_id, device_key.public_key());
+        let signed_keyring = Keyring::seal(
+            self.vault_id,
+            self.device_id,
+            &device_key,
+            generation,
+            &vault_key,
+            master_password,
+            keyring.master_password_kdf(),
+        )?;
+        let session = Session {
+            vault_key,
+            device_key,
+            generation,
+            body,
+            unsaved: false,
+        };
+        self.local.write_device_key(
+            session
+                .device_key
+                .seal(&self.owner(generation), &session.vault_key)?,
+        )?;
+        self.write_replica(&session, &session.body)?;
+        self.storage.write_keyring(signed_keyring)?;
+        Ok(session)
     }
 
     /// Bloqueia: a chave do cofre e o conteúdo decifrado saem da memória (a
@@ -391,32 +520,53 @@ impl Vault {
     /// cofre, e escreve a sua réplica se o estado mudou. Só escreve a réplica
     /// deste dispositivo (ADR-0002).
     ///
-    /// Uma réplica que não se consegue ler fica de fora e é indicada no
-    /// resultado, sem mudar o estado do cofre. Nesta versão entram na fusão as
-    /// réplicas de todos os dispositivos, sem aceitação nem assinaturas
-    /// (tickets 10 e 11). Se a escrita da réplica falhar, o estado fica como
-    /// estava.
+    /// Só entram as réplicas de dispositivos não removidos, assinadas pela
+    /// chave pública registada do seu dispositivo, cuja lista de dispositivos
+    /// não dê outra chave a um dispositivo conhecido (ADR-0012). As outras, e
+    /// as que não se conseguem ler, ficam de fora e são indicadas no
+    /// resultado, sem mudar o estado do cofre. Nesta versão, a réplica de um
+    /// dispositivo ainda desconhecido entra se estiver assinada pela chave com
+    /// que ela o regista (ticket 11). Se a escrita da réplica falhar, o estado
+    /// fica como estava.
     pub fn merge(&self) -> Result<MergeReport, VaultError> {
         let mut session = self.session();
         let session = session.as_mut().ok_or(VaultError::Locked)?;
-        let (others, skipped) = self.read_other_replicas(&session.vault_key, session.generation)?;
-        let now_ms = self.clock.now_ms();
-        let mut clock_ahead = BTreeSet::new();
-        let mut body = session.body.clone();
-        for other in others {
-            clock_ahead.extend(other.devices_with_clock_ahead(now_ms));
-            body.merge(other);
-        }
+        let merged = self.merge_other_replicas(
+            &session.vault_key,
+            session.generation,
+            Some(session.body.clone()),
+            None,
+        )?;
+        let mut body = merged.body.expect("a fusão parte do estado atual");
         // Uma entrada vinda de outra réplica pode já ter expirado no Lixo.
-        body.expire_trash(now_ms);
+        body.expire_trash(self.clock.now_ms());
         if body != session.body || session.unsaved {
             self.write_replica(session, &body)?;
             session.body = body;
             session.unsaved = false;
         }
         Ok(MergeReport {
-            skipped,
-            devices_with_clock_ahead: clock_ahead.iter().map(Id::to_string).collect(),
+            skipped: merged.skipped,
+            devices_with_clock_ahead: merged.clock_ahead.iter().map(Id::to_string).collect(),
+        })
+    }
+
+    /// Marca o dispositivo `device_id` como removido na lista de dispositivos
+    /// conhecidos, e escreve a réplica. A marca é definitiva: a réplica dele
+    /// deixa de entrar na fusão, e nenhuma fusão o volta a tornar conhecido.
+    /// Apagar a sua réplica da pasta do cofre fica para o ticket 11.
+    pub fn remove_device(&self, device_id: &str) -> Result<(), VaultError> {
+        let id = Id::from_hex(device_id).ok_or(VaultError::DeviceNotFound)?;
+        if id == self.device_id {
+            return Err(VaultError::CannotRemoveThisDevice);
+        }
+        self.change(|body| {
+            let device = body
+                .devices
+                .get_mut(&id)
+                .ok_or(VaultError::DeviceNotFound)?;
+            device.removed = true;
+            Ok(())
         })
     }
 
@@ -493,48 +643,149 @@ impl Vault {
     }
 
     fn write_replica(&self, session: &Session, body: &ReplicaBody) -> Result<(), VaultError> {
-        let bytes = replica::seal(&self.owner(session.generation), &session.vault_key, body)?;
+        let bytes = replica::seal(
+            &self.owner(session.generation),
+            &session.vault_key,
+            &session.device_key,
+            body,
+        )?;
         self.storage.write_replica(self.device_id(), bytes)?;
         Ok(())
     }
 
-    /// Lê e decifra as réplicas dos outros dispositivos na pasta do cofre,
-    /// pela ordem do id do dispositivo. Devolve também as que não se
-    /// conseguiram ler. Um ficheiro cujo nome não é um id de dispositivo não é
-    /// uma réplica, e é ignorado.
-    fn read_other_replicas(
+    /// Funde em `body` as réplicas dos outros dispositivos na pasta do cofre
+    /// que [`devices::accept_replica`] aceita. Devolve o estado fundido (ou
+    /// `None`, se não havia estado e nenhuma entrou), as que ficaram de fora,
+    /// pela ordem do id do dispositivo, e os dispositivos com o relógio
+    /// adiantado. Um ficheiro cujo nome não é um id de dispositivo não é uma
+    /// réplica, e é ignorado.
+    ///
+    /// Uma réplica pode marcar como removido um dispositivo cuja réplica já
+    /// entrou antes dela. Nesse caso a fusão recomeça sem a réplica desse
+    /// dispositivo, até nenhuma réplica que entrou ser de um dispositivo
+    /// removido: assim o resultado não depende da ordem em que chegam.
+    fn merge_other_replicas(
         &self,
         vault_key: &SecretKey,
         generation: u64,
-    ) -> Result<(Vec<ReplicaBody>, Vec<SkippedReplica>), VaultError> {
-        let mut bodies = Vec::new();
-        let mut skipped = Vec::new();
-        let mut names = self.storage.list_replicas()?;
-        names.sort();
-        for name in names {
+        body: Option<ReplicaBody>,
+        first: Option<DeviceId>,
+    ) -> Result<Merged, VaultError> {
+        let mut replicas = Vec::new();
+        for name in self.storage.list_replicas()? {
             let Some(device_id) = Id::from_hex(&name) else {
                 continue;
             };
             if device_id == self.device_id {
                 continue;
             }
-            let Some(bytes) = self.storage.read_replica(name)? else {
-                continue;
+            if let Some(bytes) = self.storage.read_replica(name)? {
+                replicas.push((device_id, bytes));
+            }
+        }
+        replicas.sort_by_key(|(device_id, _)| *device_id);
+        let mut removed = BTreeSet::new();
+        loop {
+            let pass = self.merge_pass(
+                vault_key,
+                generation,
+                body.clone(),
+                first,
+                &replicas,
+                &removed,
+            );
+            let merged_removed: Vec<DeviceId> = pass
+                .accepted
+                .iter()
+                .filter(|id| {
+                    pass.merged.body.as_ref().is_some_and(|body| {
+                        body.devices.get(id).is_some_and(|device| device.removed)
+                    })
+                })
+                .copied()
+                .collect();
+            if merged_removed.is_empty() {
+                return Ok(pass.merged);
+            }
+            removed.extend(merged_removed);
+        }
+    }
+
+    /// Uma passagem de [`Vault::merge_other_replicas`], com as réplicas dos
+    /// dispositivos `removed` deixadas de fora. Cada réplica é verificada
+    /// contra a lista de dispositivos conhecidos já fundida. Por isso entram
+    /// primeiro as dos dispositivos conhecidos, pela ordem do id, porque podem
+    /// dar a conhecer outros; quando não há mais nenhuma, entra a de `first`,
+    /// se lá estiver, e depois as dos desconhecidos, também pela ordem do id.
+    /// Assim uma réplica forjada com o id de um dispositivo que outra réplica
+    /// regista nunca passa à frente da verificação pela chave registada.
+    fn merge_pass(
+        &self,
+        vault_key: &SecretKey,
+        generation: u64,
+        mut body: Option<ReplicaBody>,
+        first: Option<DeviceId>,
+        replicas: &[(DeviceId, Vec<u8>)],
+        removed: &BTreeSet<DeviceId>,
+    ) -> Pass {
+        let now_ms = self.clock.now_ms();
+        let mut skipped = Vec::new();
+        let mut accepted = Vec::new();
+        let mut clock_ahead = BTreeSet::new();
+        let mut pending: Vec<&(DeviceId, Vec<u8>)> = Vec::new();
+        for replica in replicas {
+            match removed.contains(&replica.0) {
+                true => skipped.push(SkippedReplica {
+                    device_id: replica.0.to_string(),
+                    reason: SkipReason::RemovedDevice,
+                }),
+                false => pending.push(replica),
+            }
+        }
+        loop {
+            let known = |id: &DeviceId| {
+                body.as_ref()
+                    .is_some_and(|body| body.devices.contains_key(id))
             };
+            let next = pending
+                .iter()
+                .position(|(id, _)| known(id))
+                .or_else(|| pending.iter().position(|(id, _)| Some(*id) == first))
+                .or_else(|| (!pending.is_empty()).then_some(0));
+            let Some(next) = next else {
+                break;
+            };
+            let (device_id, bytes) = pending.remove(next);
             let owner = ReplicaOwner {
                 vault_id: self.vault_id,
-                device_id,
+                device_id: *device_id,
                 generation,
             };
-            match replica::open(&bytes, &owner, vault_key) {
-                Ok(body) => bodies.push(body),
-                Err(error) => skipped.push(SkippedReplica {
+            let known = body.as_ref().map(|body| &body.devices);
+            match devices::accept_replica(bytes, &owner, vault_key, known) {
+                Ok(other) => {
+                    accepted.push(*device_id);
+                    clock_ahead.extend(other.devices_with_clock_ahead(now_ms));
+                    match &mut body {
+                        Some(body) => body.merge(other),
+                        None => body = Some(other),
+                    }
+                }
+                Err(reason) => skipped.push(SkippedReplica {
                     device_id: device_id.to_string(),
-                    reason: SkipReason::of(&error),
+                    reason,
                 }),
             }
         }
-        Ok((bodies, skipped))
+        skipped.sort_by(|a, b| a.device_id.cmp(&b.device_id));
+        Pass {
+            merged: Merged {
+                body,
+                skipped,
+                clock_ahead,
+            },
+            accepted,
+        }
     }
 
     fn owner(&self, generation: u64) -> ReplicaOwner {
@@ -552,6 +803,19 @@ impl Vault {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+}
+
+/// O resultado de [`Vault::merge_other_replicas`].
+struct Merged {
+    body: Option<ReplicaBody>,
+    skipped: Vec<SkippedReplica>,
+    clock_ahead: BTreeSet<DeviceId>,
+}
+
+/// Uma passagem da fusão, com os dispositivos cujas réplicas entraram.
+struct Pass {
+    merged: Merged,
+    accepted: Vec<DeviceId>,
 }
 
 fn entry<'a>(body: &'a ReplicaBody, entry_id: &str) -> Result<&'a Entry, VaultError> {

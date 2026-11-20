@@ -1,14 +1,23 @@
 //! Chaveiro: o ficheiro partilhado na pasta do cofre com os invólucros da chave
 //! do cofre (ADR-0004, ADR-0006).
 //!
-//! Formato (versão 1.0):
+//! Formato (versão 1.1):
 //!
 //! ```text
 //! cabeçalho em claro (48 bytes)
 //!   "PWMK" | versão principal u16 BE | versão secundária u16 BE
 //!   | id do cofre (16) | id do dispositivo que o escreveu (16) | geração u64 BE
 //! corpo em CBOR, em claro, com os invólucros
+//! assinatura Ed25519 (64 bytes) do dispositivo que o escreveu, de
+//!   "pw-manager/signature/keyring" | cabeçalho | corpo
 //! ```
+//!
+//! A assinatura entrou na versão 1.1 (ticket 10, ADR-0006): os chaveiros 1.0
+//! acabam no corpo. O chaveiro só é aceite se estiver assinado por um
+//! dispositivo da lista de dispositivos conhecidos, com a chave registada dele
+//! ([`Keyring::verify`]). Essa lista está nas réplicas, cifradas com a chave do
+//! cofre que sai do chaveiro: por isso a assinatura só se verifica depois de
+//! desembrulhar a chave do cofre e ler as réplicas.
 //!
 //! Cada invólucro tem o seu próprio nonce. O seu AAD é o cabeçalho inteiro (com
 //! o id do cofre e a geração) seguido do tipo de método de desbloqueio, por isso
@@ -19,9 +28,9 @@
 //! cifrado para a réplica e para o chaveiro. O chaveiro não pode ter o corpo
 //! cifrado com a chave do cofre, porque é dele que a chave do cofre sai; por isso
 //! o corpo fica em claro e o nonce vai em cada invólucro. A integridade do
-//! chaveiro inteiro chega com a assinatura do dispositivo (ticket 10).
+//! chaveiro inteiro vem da assinatura do dispositivo.
 //!
-//! Até lá, e depois dela, o leitor só aceita a codificação canónica (ADR-0008):
+//! Além disso, o leitor só aceita a codificação canónica (ADR-0008):
 //! volta a codificar o cabeçalho e o corpo que leu e rejeita o chaveiro se os
 //! bytes não forem exatamente os mesmos. Assim nenhum bit do corpo, que não é
 //! autenticado por inteiro, pode mudar sem que o chaveiro seja rejeitado ou o
@@ -31,13 +40,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::cbor;
 use crate::crypto::{self, KEY_LEN, NONCE_LEN, SecretKey};
-use crate::format_version;
+use crate::device_key::{self, DeviceKey, PublicKey, SIGNATURE_LEN};
+use crate::format_version::{self, FIRST_SIGNED_MINOR};
 use crate::ids::{DeviceId, ID_LEN, Id, VaultId};
 use crate::{KdfParams, VaultError};
 
 const MAGIC: [u8; 4] = *b"PWMK";
 const FORMAT_MAJOR: u16 = 1;
-const FORMAT_MINOR: u16 = 0;
+const FORMAT_MINOR: u16 = 1;
+const SIGNATURE_LABEL: &[u8] = b"pw-manager/signature/keyring";
 const HEADER_LEN: usize = 4 + 2 + 2 + ID_LEN + ID_LEN + 8;
 const SALT_LEN: usize = 16;
 /// O tipo de método de desbloqueio no AAD: separa este invólucro dos de outros métodos.
@@ -46,8 +57,11 @@ const MASTER_PASSWORD_AAD_LABEL: &[u8] = b"pw-manager/envelope/master-password";
 pub(crate) struct Keyring {
     header_bytes: [u8; HEADER_LEN],
     vault_id: VaultId,
+    writer: DeviceId,
     generation: u64,
     body: KeyringBody,
+    /// `None` num chaveiro 1.0, de antes das assinaturas.
+    signature: Option<[u8; SIGNATURE_LEN]>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -95,10 +109,12 @@ impl From<&StoredKdfParams> for KdfParams {
 }
 
 impl Keyring {
-    /// Um chaveiro novo, com a chave do cofre embrulhada pela palavra-passe mestra.
+    /// Um chaveiro novo, com a chave do cofre embrulhada pela palavra-passe
+    /// mestra, assinado por `writer` com a sua chave `writer_key`.
     pub(crate) fn seal(
         vault_id: VaultId,
         writer: DeviceId,
+        writer_key: &DeviceKey,
         generation: u64,
         vault_key: &SecretKey,
         master_password: &str,
@@ -124,14 +140,16 @@ impl Keyring {
                 ciphertext,
             },
         };
-        Ok([header_bytes.as_slice(), &cbor::encode(&body)].concat())
+        let body = cbor::encode(&body);
+        let signature = writer_key.sign(SIGNATURE_LABEL, &[&header_bytes, &body]);
+        Ok([header_bytes.as_slice(), &body, &signature].concat())
     }
 
     /// Lê um chaveiro. Um chaveiro de uma versão principal mais recente não é
     /// lido: pede atualização.
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, VaultError> {
         format_version::check_major(bytes, MAGIC, FORMAT_MAJOR, VaultError::KeyringRejected)?;
-        let (header, body) = bytes
+        let (header, after_header) = bytes
             .split_first_chunk::<HEADER_LEN>()
             .ok_or(VaultError::KeyringRejected)?;
         // O identificador e a versão principal já foram verificados.
@@ -141,19 +159,57 @@ impl Keyring {
         let (writer, rest) = rest.split_first_chunk::<ID_LEN>().unwrap();
         let generation = u64::from_be_bytes(*rest.first_chunk::<8>().unwrap());
         let (vault_id, writer) = (Id(*vault_id), Id(*writer));
+        let minor = u16::from_be_bytes(*minor);
         // Os campos do cabeçalho têm largura fixa, por isso hoje isto só falha se
         // o cabeçalho deixar de ser o que `encode_header` escreve; fica a regra
         // para quando o cabeçalho evoluir.
-        if encode_header(u16::from_be_bytes(*minor), vault_id, writer, generation) != *header {
+        if encode_header(minor, vault_id, writer, generation) != *header {
             return Err(VaultError::KeyringRejected);
         }
+        let (body, signature) = if minor >= FIRST_SIGNED_MINOR {
+            let (body, signature) = after_header
+                .split_last_chunk::<SIGNATURE_LEN>()
+                .ok_or(VaultError::KeyringRejected)?;
+            (body, Some(*signature))
+        } else {
+            (after_header, None)
+        };
         let body: KeyringBody = cbor::decode_canonical(body).ok_or(VaultError::KeyringRejected)?;
         Ok(Self {
             header_bytes: *header,
             vault_id,
+            writer,
             generation,
             body,
+            signature,
         })
+    }
+
+    /// Aceita o chaveiro se estiver assinado pelo dispositivo que o escreveu
+    /// com a chave pública que `public_key_of` dá a esse dispositivo: a da
+    /// lista de dispositivos conhecidos, ou `None` se não o conhece.
+    ///
+    /// Um dispositivo removido continua a valer como autor: a remoção não
+    /// invalida o chaveiro que ele escreveu antes, e o chaveiro não diz quando
+    /// foi assinado. Uma geração nova escrita por um dispositivo removido é
+    /// assunto da alteração da palavra-passe mestra (ticket 14).
+    pub(crate) fn verify(
+        &self,
+        public_key_of: impl Fn(DeviceId) -> Option<PublicKey>,
+    ) -> Result<(), VaultError> {
+        let signature = self.signature.as_ref().ok_or(VaultError::KeyringRejected)?;
+        let public_key = public_key_of(self.writer).ok_or(VaultError::KeyringRejected)?;
+        let body = cbor::encode(&self.body);
+        let signed = [self.header_bytes.as_slice(), &body];
+        match device_key::verify(&public_key, SIGNATURE_LABEL, &signed, signature) {
+            true => Ok(()),
+            false => Err(VaultError::KeyringRejected),
+        }
+    }
+
+    /// É de uma versão com assinatura (1.1 ou mais recente), válida ou não.
+    pub(crate) fn is_signed(&self) -> bool {
+        self.signature.is_some()
     }
 
     pub(crate) fn vault_id(&self) -> VaultId {
@@ -164,15 +220,28 @@ impl Keyring {
         self.generation
     }
 
+    /// O dispositivo que escreveu o chaveiro, segundo o cabeçalho.
+    pub(crate) fn writer(&self) -> DeviceId {
+        self.writer
+    }
+
     /// O chaveiro escrito de novo a partir do que foi lido.
     #[cfg(feature = "fuzzing")]
     pub(crate) fn encode(&self) -> Vec<u8> {
-        [self.header_bytes.as_slice(), &cbor::encode(&self.body)].concat()
+        let signature = self
+            .signature
+            .as_ref()
+            .map_or(&[][..], |signature| signature);
+        [
+            self.header_bytes.as_slice(),
+            &cbor::encode(&self.body),
+            signature,
+        ]
+        .concat()
     }
 
     /// Os parâmetros do Argon2id do invólucro da palavra-passe mestra, como
     /// estão no ficheiro (podem ser inválidos).
-    #[cfg(feature = "fuzzing")]
     pub(crate) fn master_password_kdf(&self) -> KdfParams {
         KdfParams::from(&self.body.master_password.kdf)
     }

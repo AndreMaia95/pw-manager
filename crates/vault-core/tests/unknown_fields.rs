@@ -4,8 +4,8 @@
 mod common;
 
 use common::cbor::{array, bytes, map, text, uint};
-use common::{PASSWORD, START_MS, TestEnv, from_hex, stamp};
-use vault_core::testing::{self, MemoryVaultFolder};
+use common::{PASSWORD, START_MS, TestDevice, TestEnv, from_hex, stamp};
+use vault_core::testing;
 use vault_core::{EntryChanges, SecretField, VaultError};
 
 const ENTRY_ID: [u8; 16] = [0x5a; 16];
@@ -56,14 +56,32 @@ fn body_with_entry(title: &str, stamp: Option<Vec<u8>>, history: Option<Vec<u8>>
     ])
 }
 
+/// O corpo de [`body_with_entry`] com a lista de dispositivos conhecidos
+/// `devices`, que fica antes das entradas, pela ordem canónica.
+fn with_devices(body: Vec<u8>, devices: Vec<u8>) -> Vec<u8> {
+    let created_at_ms = [text("created_at_ms"), uint(START_MS as u64)].concat();
+    assert_eq!(body[0], 0xa3, "três campos");
+    assert_eq!(body[1..=created_at_ms.len()], created_at_ms);
+    let rest = &body[1 + created_at_ms.len()..];
+    [
+        vec![0xa4],
+        created_at_ms,
+        text("devices"),
+        devices,
+        rest.to_vec(),
+    ]
+    .concat()
+}
+
 /// Escreve `body` como réplica de `device_id` numa versão secundária mais nova
 /// do que a desta app.
-fn write_as_newer_minor_version(folder: &MemoryVaultFolder, device_id: &str, body: Vec<u8>) {
+fn write_as_newer_minor_version(device: &TestDevice, device_id: &str, body: Vec<u8>) {
+    let folder = &device.folder;
     let mut replica = testing::open_replica(folder, device_id, PASSWORD).unwrap();
     let minor = u16::from_be_bytes([replica.header[6], replica.header[7]]);
     replica.header[6..8].copy_from_slice(&(minor + 1).to_be_bytes());
     replica.body = body;
-    testing::write_replica(folder, device_id, PASSWORD, replica).unwrap();
+    testing::write_replica(folder, &device.local, device_id, PASSWORD, replica).unwrap();
 }
 
 #[test]
@@ -74,7 +92,7 @@ fn unknown_fields_from_a_newer_minor_version_survive_an_edit_byte_for_byte() {
     let our_header = testing::open_replica(&env.folder, &device_id, PASSWORD)
         .unwrap()
         .header;
-    write_as_newer_minor_version(&env.folder, &device_id, newer_body("GitHub"));
+    write_as_newer_minor_version(&device, &device_id, newer_body("GitHub"));
 
     let vault = device.open_vault(&device_id);
     vault.unlock_with_master_password(PASSWORD).unwrap();
@@ -141,7 +159,7 @@ fn an_unknown_field_out_of_canonical_order_is_rejected() {
     ]);
 
     for body in [unknown_before_born_field, unknown_not_sorted_by_encoded_key] {
-        write_as_newer_minor_version(&env.folder, &device_id, body);
+        write_as_newer_minor_version(&device, &device_id, body);
         let vault = device.open_vault(&device_id);
         assert_eq!(
             vault.unlock_with_master_password(PASSWORD),
@@ -160,7 +178,7 @@ fn an_unknown_field_whose_value_is_not_well_formed_cbor_is_rejected() {
         ("from_v1_1", b"\x82\x01".to_vec()),
     ]);
 
-    write_as_newer_minor_version(&env.folder, &device_id, truncated_array);
+    write_as_newer_minor_version(&device, &device_id, truncated_array);
     let vault = device.open_vault(&device_id);
 
     assert_eq!(
@@ -210,7 +228,7 @@ fn unknown_fields_in_a_history_version_and_a_tombstone_survive_a_rewrite_byte_fo
     let device = env.device();
     let device_id = device.create_vault(PASSWORD).device_id();
     let body = newer_body_with_history_and_tombstone();
-    write_as_newer_minor_version(&env.folder, &device_id, body.clone());
+    write_as_newer_minor_version(&device, &device_id, body.clone());
 
     let vault = device.open_vault(&device_id);
     vault.unlock_with_master_password(PASSWORD).unwrap();
@@ -234,10 +252,15 @@ fn unknown_fields_in_another_devices_replica_from_a_newer_minor_version_survive_
     let [a, n] = [env.device(), env.device()];
     let vault_a = a.create_vault(PASSWORD);
     let device_n = n.join_vault(PASSWORD).device_id();
+    let devices = known_devices(&[(&a, &vault_a.device_id()), (&n, &device_n)]);
     // N passa a ser de uma versão secundária mais nova: a sua réplica tem um
-    // campo desconhecido no corpo e outro numa entrada, com carimbo de N.
-    let newer = body_with_entry("GitHub", Some(stamp(START_MS, 0, &device_n)), None);
-    write_as_newer_minor_version(&env.folder, &device_n, newer.clone());
+    // campo desconhecido no corpo e outro numa entrada, com carimbo de N, e
+    // regista A e N como conhecidos.
+    let newer = with_devices(
+        body_with_entry("GitHub", Some(stamp(START_MS, 0, &device_n)), None),
+        devices.clone(),
+    );
+    write_as_newer_minor_version(&n, &device_n, newer.clone());
 
     vault_a.merge().unwrap();
 
@@ -274,12 +297,37 @@ fn unknown_fields_in_another_devices_replica_from_a_newer_minor_version_survive_
     );
     assert_eq!(
         edited.body,
-        body_with_entry(
-            "GitHub pessoal",
-            Some(stamp(START_MS + 60_000, 0, &device_a)),
-            Some(array(&[previous]))
+        with_devices(
+            body_with_entry(
+                "GitHub pessoal",
+                Some(stamp(START_MS + 60_000, 0, &device_a)),
+                Some(array(&[previous]))
+            ),
+            devices
         )
     );
+}
+
+/// A lista de dispositivos conhecidos com os `devices` (dispositivo de teste,
+/// id), em CBOR pela ordem canónica: pelo id.
+fn known_devices(devices: &[(&TestDevice, &str)]) -> Vec<u8> {
+    let mut devices: Vec<(Vec<u8>, Vec<u8>)> = devices
+        .iter()
+        .map(|(device, id)| {
+            let public_key =
+                testing::device_public_key(&device.local, &device.folder, PASSWORD).unwrap();
+            let id = from_hex(id);
+            let record = map(&[("id", bytes(&id)), ("public_key", bytes(&public_key))]);
+            (id, record)
+        })
+        .collect();
+    devices.sort();
+    array(
+        &devices
+            .into_iter()
+            .map(|(_, record)| record)
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn hex(bytes: &[u8]) -> String {

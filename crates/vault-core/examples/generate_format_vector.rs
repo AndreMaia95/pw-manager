@@ -1,8 +1,12 @@
 //! Gera um vetor de teste do formato com a versão atual (ADR-0016).
 //!
 //! ```text
-//! cargo run -p vault-core --example generate_format_vector -- <nome> [--with-unknown-fields | --with-trash-and-history | --with-generator-settings | --with-two-devices]
+//! cargo run -p vault-core --example generate_format_vector -- <nome> [--with-unknown-fields | --with-trash-and-history | --with-generator-settings | --with-two-devices | --with-removed-device]
 //! ```
+//!
+//! Com `--with-removed-device`, mais dois dispositivos juntam-se ao cofre; o
+//! primeiro funde e remove o terceiro, e o segundo funde. A pasta do vetor
+//! leva as três réplicas (ticket 10).
 //!
 //! Com `--with-two-devices`, um segundo dispositivo junta-se ao cofre e os
 //! dois editam a mesma entrada; um apaga definitivamente a outra entrada, que o
@@ -20,6 +24,10 @@
 //! um campo desconhecido no corpo e outro numa entrada (ADR-0008): leva a
 //! versão do formato desta app no cabeçalho e os campos preservados no corpo.
 //!
+//! A partir da versão 1.1 as réplicas são assinadas, e a pasta do vetor leva
+//! também a chave de cada dispositivo, como está na sua pasta local, em
+//! `device_keys/<id do dispositivo>`.
+//!
 //! Escreve `crates/vault-core/tests/vectors/v<versão>/<nome>/`, com a versão do
 //! formato lida dos bytes escritos (não do que se escreve na linha de comandos),
 //! e imprime a entrada a
@@ -31,7 +39,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use vault_core::testing::{self, ManualClock, MemoryVaultFolder};
+use vault_core::testing::{self, ManualClock, MemoryLocalFolder, MemoryVaultFolder};
 use vault_core::{
     EntryChanges, EntryFields, EntryState, GeneratorSettings, KdfParams, SecretField, Vault,
 };
@@ -87,29 +95,34 @@ fn main() -> ExitCode {
     let with_trash_and_history = flag("--with-trash-and-history");
     let with_generator_settings = flag("--with-generator-settings");
     let with_two_devices = flag("--with-two-devices");
+    let with_removed_device = flag("--with-removed-device");
     let name = match args.as_slice() {
         [name] => name.clone(),
         [name, _]
             if with_unknown_fields
                 || with_trash_and_history
                 || with_generator_settings
-                || with_two_devices =>
+                || with_two_devices
+                || with_removed_device =>
         {
             name.clone()
         }
         _ => {
             eprintln!(
-                "uso: generate_format_vector <nome> [--with-unknown-fields | --with-trash-and-history | --with-generator-settings | --with-two-devices], p. ex. single-device"
+                "uso: generate_format_vector <nome> [--with-unknown-fields | --with-trash-and-history | --with-generator-settings | --with-two-devices | --with-removed-device], p. ex. single-device"
             );
             return ExitCode::FAILURE;
         }
     };
-    // Devolve também os ids das entradas apagadas definitivamente.
+    // Devolve também as pastas locais de cada dispositivo, os ids das
+    // entradas apagadas definitivamente e os dos dispositivos removidos.
     let write = |master_password: &str| {
-        let (folder, clock, vault) = write_vault(master_password);
+        let (folder, local, clock, vault) = write_vault(master_password);
+        let mut locals = vec![(vault.device_id(), local.clone())];
         let mut deleted = Vec::new();
+        let mut removed = Vec::new();
         if with_unknown_fields {
-            add_unknown_fields(&folder, &vault, master_password);
+            add_unknown_fields(&folder, &local, &vault, master_password);
         }
         if with_trash_and_history {
             deleted.push(add_trash_and_history(&clock, &vault));
@@ -118,9 +131,16 @@ fn main() -> ExitCode {
             add_generator_settings(&vault);
         }
         if with_two_devices {
-            deleted.extend(add_second_device(&folder, &clock, &vault, master_password));
+            let (second, deleted_ids) = add_second_device(&folder, &clock, &vault, master_password);
+            locals.push(second);
+            deleted.extend(deleted_ids);
         }
-        (folder, vault, deleted)
+        if with_removed_device {
+            let (others, removed_id) = add_removed_device(&folder, &vault, master_password);
+            locals.extend(others);
+            removed.push(removed_id);
+        }
+        (folder, locals, vault, deleted, removed)
     };
 
     // A palavra-passe leva a versão, que só se conhece depois de escrever; o
@@ -141,13 +161,19 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let master_password = format!("vetor de teste {version}");
-    let (folder, vault, deleted) = write(&master_password);
+    let (folder, locals, vault, deleted, removed) = write(&master_password);
 
     fs::create_dir_all(dir.join("replicas")).expect("criar a pasta do vetor");
     fs::write(dir.join("keyring"), folder.keyring().expect("chaveiro")).expect("escrever");
     for device_id in folder.replica_device_ids() {
         let bytes = folder.replica(&device_id).expect("réplica");
         fs::write(dir.join("replicas").join(&device_id), bytes).expect("escrever");
+    }
+    for (device_id, local) in &locals {
+        if let Some(bytes) = local.device_key() {
+            fs::create_dir_all(dir.join("device_keys")).expect("criar a pasta das chaves");
+            fs::write(dir.join("device_keys").join(device_id), bytes).expect("escrever");
+        }
     }
 
     println!(
@@ -241,6 +267,7 @@ fn main() -> ExitCode {
         ],
         unknown_fields: &[{unknown_fields}],
         tombstones: &[{tombstones}],
+        removed_devices: &[{removed_devices}],
     }},
 }},"#,
         vault_id = vault.vault_id(),
@@ -257,6 +284,11 @@ fn main() -> ExitCode {
             .map(|id| format!("{id:?}"))
             .collect::<Vec<_>>()
             .join(", "),
+        removed_devices = removed
+            .iter()
+            .map(|id| format!("{id:?}"))
+            .collect::<Vec<_>>()
+            .join(", "),
     );
     ExitCode::SUCCESS
 }
@@ -265,7 +297,12 @@ fn main() -> ExitCode {
 /// versão secundária mais nova, com as mesmas entradas e um campo desconhecido
 /// no corpo e outro na entrada "GitHub"; depois esta versão lê-a e reescreve-a
 /// com uma edição.
-fn add_unknown_fields(folder: &MemoryVaultFolder, vault: &Vault, master_password: &str) {
+fn add_unknown_fields(
+    folder: &MemoryVaultFolder,
+    local: &MemoryLocalFolder,
+    vault: &Vault,
+    master_password: &str,
+) {
     let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     for entry in vault.list_entries().expect("listar as entradas") {
         let reveal = |field| vault.reveal(&entry.id, field).expect("revelar");
@@ -299,7 +336,7 @@ fn add_unknown_fields(folder: &MemoryVaultFolder, vault: &Vault, master_password
     let minor = u16::from_be_bytes([replica.header[6], replica.header[7]]);
     replica.header[6..8].copy_from_slice(&(minor + 1).to_be_bytes());
     replica.body = body;
-    testing::write_replica(folder, &device_id, master_password, replica).expect("cifrar");
+    testing::write_replica(folder, local, &device_id, master_password, replica).expect("cifrar");
 
     vault.lock();
     vault
@@ -364,16 +401,19 @@ fn add_trash_and_history(clock: &ManualClock, vault: &Vault) -> String {
 /// Os dois editam a palavra-passe da entrada "GitHub" (ganha a do segundo, um
 /// dia depois); o primeiro apaga definitivamente a outra entrada, que o
 /// segundo edita depois, e cria uma terceira que apaga definitivamente. Os
-/// dois fundem. Devolve os ids das entradas apagadas.
+/// dois fundem. Devolve o id e a pasta local do segundo, e os ids das
+/// entradas apagadas.
 fn add_second_device(
     folder: &MemoryVaultFolder,
     clock: &ManualClock,
     vault: &Vault,
     master_password: &str,
-) -> Vec<String> {
+) -> ((String, MemoryLocalFolder), Vec<String>) {
     let second_clock = ManualClock::new(CREATED_AT_MS);
+    let second_local = MemoryLocalFolder::new();
     let second = Vault::join(
         Arc::new(folder.clone()),
+        Arc::new(second_local.clone()),
         Arc::new(second_clock.clone()),
         master_password,
     )
@@ -422,7 +462,46 @@ fn add_second_device(
 
     vault.merge().expect("fundir no primeiro");
     second.merge().expect("fundir no segundo");
-    vec![other.clone(), deleted]
+    (
+        (second.device_id(), second_local),
+        vec![other.clone(), deleted],
+    )
+}
+
+/// Junta mais dois dispositivos ao cofre de `vault`. O primeiro funde e remove
+/// o terceiro, e o segundo funde, ficando a saber da remoção. Devolve o id e a
+/// pasta local de cada um dos dois, e o id do removido.
+fn add_removed_device(
+    folder: &MemoryVaultFolder,
+    vault: &Vault,
+    master_password: &str,
+) -> (Vec<(String, MemoryLocalFolder)>, String) {
+    let join = || {
+        let local = MemoryLocalFolder::new();
+        let joined = Vault::join(
+            Arc::new(folder.clone()),
+            Arc::new(local.clone()),
+            Arc::new(ManualClock::new(CREATED_AT_MS)),
+            master_password,
+        )
+        .expect("juntar um dispositivo");
+        (joined, local)
+    };
+    let (second, second_local) = join();
+    let (third, third_local) = join();
+    vault.merge().expect("fundir no primeiro");
+    vault
+        .remove_device(&third.device_id())
+        .expect("remover o terceiro");
+    second.merge().expect("fundir no segundo");
+    let removed = third.device_id();
+    (
+        vec![
+            (second.device_id(), second_local),
+            (removed.clone(), third_local),
+        ],
+        removed,
+    )
 }
 
 /// Gera a palavra-passe da entrada "GitHub" com ajustes próprios (sem
@@ -469,12 +548,16 @@ fn escaped(bytes: &[u8]) -> String {
 }
 
 /// Um cofre novo, escrito pela versão atual numa pasta do cofre em memória,
-/// com o relógio que usa.
-fn write_vault(master_password: &str) -> (MemoryVaultFolder, ManualClock, Vault) {
+/// com a pasta local e o relógio do dispositivo que o criou.
+fn write_vault(
+    master_password: &str,
+) -> (MemoryVaultFolder, MemoryLocalFolder, ManualClock, Vault) {
     let folder = MemoryVaultFolder::new();
+    let local = MemoryLocalFolder::new();
     let clock = ManualClock::new(CREATED_AT_MS);
     let vault = Vault::create(
         Arc::new(folder.clone()),
+        Arc::new(local.clone()),
         Arc::new(clock.clone()),
         master_password,
         KDF,
@@ -485,7 +568,7 @@ fn write_vault(master_password: &str) -> (MemoryVaultFolder, ManualClock, Vault)
             .create_entry(fields(*entry))
             .expect("criar uma entrada");
     }
-    (folder, clock, vault)
+    (folder, local, clock, vault)
 }
 
 /// `v<principal>.<secundária>`, dos cabeçalhos do chaveiro e das réplicas

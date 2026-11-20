@@ -8,9 +8,15 @@ atual e compara o estado lido com o estado esperado, que está na tabela
 
 ```text
 v<principal>.<secundária>/<nome>/
-  keyring                     o chaveiro, tal como fica na pasta do cofre
-  replicas/<id do dispositivo>  a réplica de cada dispositivo
+  keyring                        o chaveiro, tal como fica na pasta do cofre
+  replicas/<id do dispositivo>     a réplica de cada dispositivo
+  device_keys/<id do dispositivo>  a chave de cada dispositivo, tal como fica
+                                   na sua pasta local (desde a versão 1.1)
 ```
+
+Os vetores 1.0 são de antes das assinaturas: não têm `device_keys/`, e o
+dispositivo que os abre é migrado no desbloqueio (gera a sua chave e assina a
+réplica e o chaveiro).
 
 A palavra-passe mestra de cada vetor é `vetor de teste v<principal>.<secundária>`,
 e o Argon2id usa parâmetros leves e fixos (256 KiB, 2 iterações, 2 lanes). Os
@@ -67,6 +73,11 @@ dados que os vetores existentes ainda não cobrem (entradas, histórico, lápide
    e uma terceira que fica só como lápide; os dois fundem. A pasta do vetor
    leva as duas réplicas, e `ExpectedState` descreve a do primeiro. Os ids
    das entradas que só ficam como lápide vão para `tombstones`.
+
+   Com `--with-removed-device` no fim, mais dois dispositivos juntam-se; o
+   primeiro funde e remove o terceiro, e o segundo funde. A pasta do vetor
+   leva as três réplicas e as três chaves; o id do removido vai para
+   `removed_devices` em `ExpectedState`.
 
    O gerador lê a versão do formato dos bytes que escreveu e põe o vetor em
    `v<principal>.<secundária>/<nome>/`. Recusa-se a escrever sobre uma pasta que

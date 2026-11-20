@@ -232,6 +232,49 @@ fn the_merge_seed_of_the_fuzzer_is_the_one_tested_here() {
     );
 }
 
+/// Um corpo com a lista de dispositivos conhecidos (ticket 10), com
+/// `public_key` como chave pública do dispositivo `0x22…`: um dispositivo
+/// removido com um campo desconhecido, e outro. Pela ordem canónica
+/// (ADR-0008).
+fn replica_body_with_devices_seed(public_key: u8, removed: bool) -> Vec<u8> {
+    let mut first = vec![("id", bytes(&[0x11; 16])), ("colour", uint(1))];
+    if removed {
+        first.push(("removed", b"\xf5".to_vec()));
+    }
+    first.push(("public_key", bytes(&[0xa1; 32])));
+    let second = map(&[
+        ("id", bytes(&[0x22; 16])),
+        ("public_key", bytes(&[public_key; 32])),
+    ]);
+    map(&[
+        ("created_at_ms", uint(0)),
+        ("devices", array(&[map(&first), second])),
+    ])
+}
+
+#[test]
+fn the_replica_body_decoder_survives_a_body_with_devices_and_its_mutations() {
+    let seed = replica_body_with_devices_seed(0xb2, true);
+    assert!(
+        fuzzing::replica_body_is_accepted(&seed),
+        "a semente é válida"
+    );
+    for_each_mutation(&seed, fuzzing::replica_body);
+}
+
+/// Duas listas de dispositivos que diferem na marca de removido e na chave
+/// de um dispositivo: a fusão não depende da ordem mesmo assim.
+#[test]
+fn the_merge_survives_two_device_lists_and_their_mutations() {
+    let first = replica_body_with_devices_seed(0xb2, true);
+    let second = replica_body_with_devices_seed(0xc3, false);
+    assert!(
+        fuzzing::replica_body_is_accepted(&second),
+        "a semente é válida"
+    );
+    for_each_mutation(&fuzzing::merge_input(&first, &second), fuzzing::merge);
+}
+
 #[test]
 fn a_deeply_nested_unknown_value_is_rejected_without_exhausting_the_stack() {
     let deeply_nested = [vec![0x81; 100_000], vec![0x00]].concat();
@@ -262,18 +305,18 @@ proptest! {
     }
 }
 
-/// Bytes arbitrários, metade das vezes atrás de um cabeçalho de chaveiro v1.0
-/// para chegarem ao descodificador CBOR.
+/// Bytes arbitrários, dois terços das vezes atrás de um cabeçalho de chaveiro
+/// v1.0 (sem assinatura) ou v1.1 (com assinatura no fim) para chegarem ao
+/// descodificador CBOR e à verificação da assinatura.
 fn keyring_like_bytes() -> impl Strategy<Value = Vec<u8>> {
-    let header = b"PWMK\x00\x01\x00\x00".to_vec();
+    let behind = |header: &'static [u8]| {
+        (any::<[u8; 40]>(), any::<Vec<u8>>())
+            .prop_map(move |(ids, body)| [header, &ids, &body].concat())
+    };
     prop_oneof![
         any::<Vec<u8>>(),
-        (any::<[u8; 40]>(), any::<Vec<u8>>()).prop_map(move |(ids, body)| [
-            header.as_slice(),
-            &ids,
-            &body
-        ]
-        .concat()),
+        behind(b"PWMK\x00\x01\x00\x00"),
+        behind(b"PWMK\x00\x01\x00\x01"),
     ]
 }
 

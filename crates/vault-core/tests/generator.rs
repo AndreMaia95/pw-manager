@@ -316,7 +316,7 @@ fn vault_with_body(body: Vec<u8>) -> (TestEnv, String, Result<Vault, VaultError>
     let device_id = device.create_vault(PASSWORD).device_id();
     let mut replica = testing::open_replica(&env.folder, &device_id, PASSWORD).unwrap();
     replica.body = body;
-    testing::write_replica(&env.folder, &device_id, PASSWORD, replica).unwrap();
+    testing::write_replica(&env.folder, &device.local, &device_id, PASSWORD, replica).unwrap();
     let vault = device.open_vault(&device_id);
     let unlocked = vault.unlock_with_master_password(PASSWORD).map(|()| vault);
     (env, device_id, unlocked)

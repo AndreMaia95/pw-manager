@@ -1,5 +1,5 @@
-//! Alvos de fuzzing do leitor de cabeçalhos, do descodificador CBOR e da
-//! fusão (ADR-0016).
+//! Alvos de fuzzing do leitor de cabeçalhos, do descodificador CBOR, da
+//! verificação de assinatura e da fusão (ADR-0016).
 //!
 //! Uma réplica ou um chaveiro na pasta do cofre podem vir de um atacante. Cada
 //! função recebe bytes arbitrários e entra em pânico se o leitor entrar em
@@ -7,13 +7,16 @@
 //! `fuzz/` e, com sementes, por `tests/fuzz_harnesses.rs`. Só existem com a
 //! feature `fuzzing`, nunca em produção.
 //!
-//! As posições dos campos são as do formato 1.0 descrito em `replica.rs` e
+//! As posições dos campos são as do formato 1.1 descrito em `replica.rs` e
 //! `keyring.rs`, escritas aqui à mão de propósito: são o que o leitor tem de
 //! respeitar, não o que ele faz.
 
 use crate::crypto::{self, KEY_LEN, NONCE_LEN, SecretKey};
+use crate::device_key::DeviceKey;
+use crate::devices::{self, KnownDevice, KnownDevices};
 use crate::ids::Id;
 use crate::keyring::Keyring;
+use crate::merge::SkipReason;
 use crate::replica::{self, ReplicaBody, ReplicaOwner};
 use crate::{KdfParams, VaultError};
 
@@ -22,10 +25,14 @@ const OWNER_VAULT_ID: [u8; 16] = [0x11; 16];
 const OWNER_DEVICE_ID: [u8; 16] = [0x22; 16];
 const OWNER_GENERATION: u64 = 7;
 const VAULT_KEY: [u8; KEY_LEN] = [0x33; KEY_LEN];
+/// A semente da chave do dispositivo dono da réplica, e a de outro.
+const OWNER_DEVICE_SEED: [u8; KEY_LEN] = [0x44; KEY_LEN];
+const OTHER_DEVICE_SEED: [u8; KEY_LEN] = [0x55; KEY_LEN];
+const REPLICA_SIGNATURE_LABEL: &[u8] = b"pw-manager/signature/replica";
 const WRONG_PASSWORD: &str = "não é a palavra-passe mestra";
 
-/// O leitor do chaveiro: cabeçalho e corpo CBOR, e o invólucro da palavra-passe
-/// mestra quando os parâmetros do Argon2id são baratos.
+/// O leitor do chaveiro: cabeçalho e corpo CBOR, a assinatura, e o invólucro
+/// da palavra-passe mestra quando os parâmetros do Argon2id são baratos.
 pub fn keyring(data: &[u8]) {
     let keyring = match Keyring::decode(data) {
         Ok(keyring) => keyring,
@@ -66,6 +73,21 @@ pub fn keyring(data: &[u8]) {
         "aceitou um chaveiro fora da codificação canónica"
     );
 
+    // Sem a chave privada, ninguém faz uma assinatura que confira, nem com o
+    // autor do cabeçalho registado com a chave pública dela.
+    let writer = Id(data[24..40].try_into().unwrap());
+    let devices = known_devices(writer);
+    assert_eq!(
+        keyring.verify(|id| devices::public_key(&devices, id)),
+        Err(VaultError::KeyringRejected),
+        "aceitou um chaveiro sem assinatura válida"
+    );
+    assert_eq!(
+        keyring.verify(|_| None),
+        Err(VaultError::KeyringRejected),
+        "aceitou um chaveiro de um dispositivo que não conhece"
+    );
+
     // Sem calcular o Argon2id e o Poly1305, ninguém faz um invólucro que abra
     // com esta palavra-passe. Só com parâmetros baratos, para o fuzzing não ficar
     // preso no Argon2id de um chaveiro que pede gigabytes.
@@ -78,48 +100,83 @@ pub fn keyring(data: &[u8]) {
     }
 }
 
-/// O leitor da réplica. Primeiro tal como vem: sem a chave do cofre, nenhuns
-/// bytes são uma réplica autêntica. Depois com os mesmos bytes autenticados pela
-/// chave do cofre: o leitor só aceita o cabeçalho do dono da réplica. Em ambos
-/// os casos, uma réplica de uma versão principal mais recente pede atualização
-/// sem ser lida.
+/// O leitor da réplica e a verificação da assinatura, como decide
+/// [`devices::accept_replica`] se uma réplica entra na fusão.
+///
+/// Primeiro tal como vem: sem a chave do cofre e a chave privada do
+/// dispositivo, nenhuns bytes são uma réplica aceite, seja o dispositivo
+/// conhecido ou não. Depois com os mesmos bytes (cabeçalho e corpo em claro)
+/// cifrados pela chave do cofre e assinados pelo dispositivo: o leitor só
+/// aceita o cabeçalho do dono da réplica numa versão com assinatura, e um
+/// corpo que não dê outra chave ao dispositivo. Por fim assinados com outra
+/// chave: nunca entram. Em todos os casos, uma réplica de uma versão principal
+/// mais recente pede atualização sem ser lida.
 pub fn replica(data: &[u8]) {
     let owner = owner();
     let vault_key = SecretKey::new(VAULT_KEY);
+    let device_key = DeviceKey::from_seed(&OWNER_DEVICE_SEED);
+    let known = known_devices(owner.device_id);
     let newer_major = is_newer_major(data, b"PWMR");
-    let unreadable = if newer_major {
-        VaultError::UpdateRequired
-    } else {
-        VaultError::ReplicaRejected
+    let accept = |bytes: &[u8], known: Option<&KnownDevices>| {
+        devices::accept_replica(bytes, &owner, &vault_key, known)
     };
-    assert_eq!(
-        replica::open(data, &owner, &vault_key).err(),
-        Some(unreadable),
-        "aceitou uma réplica sem a autenticar"
-    );
+
+    for known in [Some(&known), None] {
+        match accept(data, known) {
+            Err(SkipReason::UpdateRequired) => assert!(
+                newer_major,
+                "pediu atualização para uma réplica que não é de uma versão principal mais recente"
+            ),
+            Err(_) => assert!(
+                !newer_major,
+                "rejeitou uma réplica de uma versão principal mais recente sem pedir atualização"
+            ),
+            Ok(_) => panic!("aceitou uma réplica sem a autenticar"),
+        }
+    }
 
     let Some((header, plaintext)) = data.split_first_chunk::<REPLICA_HEADER_LEN>() else {
         return;
     };
     let nonce: &[u8; NONCE_LEN] = header[48..].try_into().unwrap();
-    let sealed = [
-        header.as_slice(),
-        &crypto::seal(&vault_key, nonce, header, plaintext),
-    ]
-    .concat();
+    let ciphertext = crypto::seal(&vault_key, nonce, header, plaintext);
+    let signed_by = |key: &DeviceKey| {
+        let signature = key.sign(REPLICA_SIGNATURE_LABEL, &[header, &ciphertext]);
+        [header.as_slice(), &ciphertext, &signature].concat()
+    };
+    let signed = header[6..8] != [0, 0];
     let belongs_to_owner = header[0..4] == *b"PWMR"
         && header[4..6] == [0, 1]
         && header[8..24] == OWNER_VAULT_ID
         && header[24..40] == OWNER_DEVICE_ID
         && header[40..48] == OWNER_GENERATION.to_be_bytes();
     let expected = if newer_major {
-        Err(VaultError::UpdateRequired)
-    } else if belongs_to_owner {
-        replica::decode_body(plaintext)
+        Err(SkipReason::UpdateRequired)
+    } else if !belongs_to_owner {
+        Err(SkipReason::Rejected)
+    } else if !signed {
+        Err(SkipReason::InvalidSignature)
     } else {
-        Err(VaultError::ReplicaRejected)
+        match replica::decode_body(plaintext) {
+            Err(_) => Err(SkipReason::Rejected),
+            Ok(body) => match body.devices.get(&owner.device_id) {
+                Some(device) if device.public_key != device_key.public_key() => {
+                    Err(SkipReason::ConflictingKey)
+                }
+                _ => Ok(body),
+            },
+        }
     };
-    assert_eq!(replica::open(&sealed, &owner, &vault_key), expected);
+    assert_eq!(accept(&signed_by(&device_key), Some(&known)), expected);
+
+    let forged = signed_by(&DeviceKey::from_seed(&OTHER_DEVICE_SEED));
+    if !newer_major && belongs_to_owner {
+        assert_eq!(
+            accept(&forged, Some(&known)),
+            Err(SkipReason::InvalidSignature),
+            "aceitou uma réplica assinada com outra chave"
+        );
+    }
 }
 
 /// O descodificador CBOR do corpo decifrado da réplica: só aceita a codificação
@@ -199,6 +256,13 @@ pub fn replica_body_is_accepted(data: &[u8]) -> bool {
 /// Tem o identificador `magic` e uma versão principal acima de 1, a desta app.
 fn is_newer_major(data: &[u8], magic: &[u8; 4]) -> bool {
     data.len() >= 6 && data[0..4] == *magic && u16::from_be_bytes([data[4], data[5]]) > 1
+}
+
+/// Uma lista de dispositivos conhecidos só com `device`, registado com a
+/// chave pública da semente [`OWNER_DEVICE_SEED`].
+fn known_devices(device: Id) -> KnownDevices {
+    let public_key = DeviceKey::from_seed(&OWNER_DEVICE_SEED).public_key();
+    KnownDevices::from([(device, KnownDevice::new(device, public_key))])
 }
 
 fn owner() -> ReplicaOwner {

@@ -10,11 +10,11 @@ mod common;
 use std::sync::Arc;
 
 use common::cbor::{bytes, text};
-use common::{from_hex, load_vector, vector_dirs, vectors_root};
-use vault_core::testing::{self, ManualClock, MemoryVaultFolder};
+use common::{from_hex, load_vector, load_vector_local_folder, vector_dirs, vectors_root};
+use vault_core::testing::{self, ManualClock, MemoryLocalFolder, MemoryVaultFolder};
 use vault_core::{
-    EntryChanges, EntryState, GeneratorSettings, PassphraseSeparator, SecretField, Vault,
-    VaultError,
+    EntryChanges, EntryState, GeneratorSettings, PassphraseSeparator, SecretField, SkipReason,
+    SkippedReplica, Vault, VaultError,
 };
 
 struct FormatVector {
@@ -38,6 +38,9 @@ struct ExpectedState {
     unknown_fields: &'static [(&'static str, &'static [u8])],
     /// Ids de entradas que só existem como lápide.
     tombstones: &'static [&'static str],
+    /// Ids de dispositivos removidos, cuja réplica está no vetor e tem de
+    /// ficar de fora da fusão.
+    removed_devices: &'static [&'static str],
 }
 
 struct ExpectedEntry {
@@ -88,6 +91,7 @@ const VECTORS: &[FormatVector] = &[
             entries: &[],
             unknown_fields: &[],
             tombstones: &[],
+            removed_devices: &[],
         },
     },
     FormatVector {
@@ -123,6 +127,7 @@ const VECTORS: &[FormatVector] = &[
             ],
             unknown_fields: &[],
             tombstones: &[],
+            removed_devices: &[],
         },
     },
     FormatVector {
@@ -161,6 +166,7 @@ const VECTORS: &[FormatVector] = &[
                 ("colour", b"\xa2\x61\x62\x01\x61\x61\x02"),
             ],
             tombstones: &[],
+            removed_devices: &[],
         },
     },
     FormatVector {
@@ -216,6 +222,7 @@ const VECTORS: &[FormatVector] = &[
             ],
             unknown_fields: &[],
             tombstones: &["c26f08d1eeb73e96d8c9bcc34f51156f"],
+            removed_devices: &[],
         },
     },
     FormatVector {
@@ -276,6 +283,7 @@ const VECTORS: &[FormatVector] = &[
             ],
             unknown_fields: &[],
             tombstones: &[],
+            removed_devices: &[],
         },
     },
     FormatVector {
@@ -335,6 +343,7 @@ const VECTORS: &[FormatVector] = &[
             ],
             unknown_fields: &[],
             tombstones: &[],
+            removed_devices: &[],
         },
     },
     // Dois dispositivos que fundiram (ticket 09): carimbos nas entradas, nas
@@ -394,6 +403,46 @@ const VECTORS: &[FormatVector] = &[
             ],
             unknown_fields: &[],
             tombstones: &["6604a5afc88e92955a6581b73a5b4aa3"],
+            removed_devices: &[],
+        },
+    },
+    // Réplicas e chaveiro assinados (ticket 10), com a chave de cada
+    // dispositivo na pasta local, e três dispositivos na lista de dispositivos
+    // conhecidos, um deles removido, cuja réplica ficou na pasta do vetor.
+    FormatVector {
+        path: "v1.1/with-removed-device",
+        master_password: "vetor de teste v1.1",
+        expected: ExpectedState {
+            vault_id: "6c224e611f3f3868c2df2309c7abae6c",
+            device_id: "cca662955b39d444b156bee9086d84e4",
+            created_at_ms: 1_767_225_600_000,
+            entries: &[
+                ExpectedEntry {
+                    id: "e88ca6263c5574ee8d067ce350589579",
+                    title: "exemplo.pt",
+                    url: "https://www.exemplo.pt/entrar",
+                    username: "utilizador@exemplo.pt",
+                    password: "vetor: palavra-passe 2",
+                    notes: "",
+                    state: EntryState::Active,
+                    history: &[],
+                    generator: DEFAULT_GENERATOR,
+                },
+                ExpectedEntry {
+                    id: "6f1c2698b86ea7a6f440694c66efe12c",
+                    title: "GitHub",
+                    url: "https://github.com/login",
+                    username: "andre",
+                    password: "vetor: palavra-passe 1",
+                    notes: "vetor: notas 1",
+                    state: EntryState::Active,
+                    history: &[],
+                    generator: DEFAULT_GENERATOR,
+                },
+            ],
+            unknown_fields: &[],
+            tombstones: &[],
+            removed_devices: &["9df2dc81eed85e76bb124438a0e590e4"],
         },
     },
 ];
@@ -403,7 +452,8 @@ fn every_format_vector_opens_with_the_current_version_and_gives_the_expected_sta
     for vector in VECTORS {
         let path = vector.path;
         let expected = &vector.expected;
-        let vault = open(&load(path), expected.device_id)
+        let (folder, local) = load(vector);
+        let vault = open(&folder, &local, expected.device_id)
             .unwrap_or_else(|error| panic!("{path}: abrir o cofre: {error}"));
         assert_eq!(vault.vault_id(), expected.vault_id, "{path}: id do cofre");
         assert_eq!(
@@ -436,11 +486,11 @@ fn unknown_fields_in_every_format_vector_survive_a_rewrite_byte_for_byte() {
     for vector in VECTORS {
         let path = vector.path;
         let expected = &vector.expected;
-        let folder = load(path);
+        let (folder, local) = load(vector);
         assert_preserved(&folder, vector, "como está no vetor");
 
-        let vault =
-            unlock(&folder, vector).unwrap_or_else(|error| panic!("{path}: desbloquear: {error}"));
+        let vault = unlock(&folder, &local, vector)
+            .unwrap_or_else(|error| panic!("{path}: desbloquear: {error}"));
         let active = expected
             .entries
             .iter()
@@ -550,6 +600,31 @@ fn assert_history(vault: &Vault, id: &str, expected: &[ExpectedVersion], path: &
 }
 
 #[test]
+fn the_replicas_of_removed_devices_in_every_format_vector_stay_out_of_the_merge() {
+    for vector in VECTORS {
+        let path = vector.path;
+        let (folder, local) = load(vector);
+        let vault = unlock(&folder, &local, vector)
+            .unwrap_or_else(|error| panic!("{path}: desbloquear: {error}"));
+
+        let report = vault
+            .merge()
+            .unwrap_or_else(|error| panic!("{path}: fundir: {error}"));
+
+        for removed in vector.expected.removed_devices {
+            let skipped = SkippedReplica {
+                device_id: removed.to_string(),
+                reason: SkipReason::RemovedDevice,
+            };
+            assert!(
+                report.skipped.contains(&skipped),
+                "{path}: réplica do dispositivo removido {removed}"
+            );
+        }
+    }
+}
+
+#[test]
 fn every_format_vector_in_the_repository_is_checked() {
     let mut on_disk: Vec<String> = vector_dirs()
         .iter()
@@ -571,24 +646,26 @@ fn every_format_vector_in_the_repository_is_checked() {
 /// Nenhum bit de um vetor pode mudar sem que o desbloqueio com a palavra-passe
 /// mestra certa falhe.
 ///
-/// A réplica é autenticada por inteiro. O corpo do chaveiro não (ADR-0008; a
-/// assinatura do chaveiro chega no ticket 10), mas o leitor só aceita a
-/// codificação canónica: uma alteração sem significado, como uma chave do mapa
-/// CBOR escrita em bytes em vez de texto, é rejeitada; qualquer outra muda o
-/// cabeçalho autenticado, os parâmetros do Argon2id ou o próprio invólucro.
+/// A réplica é autenticada por inteiro, e desde a versão 1.1 assinada. O corpo
+/// do chaveiro não é autenticado pelos invólucros (ADR-0008), mas desde a
+/// versão 1.1 é assinado; e o leitor só aceita a codificação canónica: num
+/// chaveiro 1.0, uma alteração sem significado, como uma chave do mapa CBOR
+/// escrita em bytes em vez de texto, é rejeitada, e qualquer outra muda o
+/// cabeçalho autenticado, os parâmetros do Argon2id ou o próprio invólucro. A
+/// chave do dispositivo, na pasta local, é autenticada pela chave do cofre.
 #[test]
 fn a_format_vector_with_any_bit_flipped_fails_to_unlock() {
     for vector in VECTORS {
         let path = vector.path;
         let expected = &vector.expected;
-        let folder = load(path);
+        let (folder, local) = load(vector);
         let keyring = folder.keyring().unwrap();
         let replica = folder.replica(expected.device_id).unwrap();
 
         for (bit, tampered) in every_bit_flip(&keyring) {
             folder.put_keyring(tampered);
             assert!(
-                unlock(&folder, vector).is_err(),
+                unlock(&folder, &local, vector).is_err(),
                 "{path}: chaveiro com o bit {bit} trocado"
             );
         }
@@ -596,31 +673,53 @@ fn a_format_vector_with_any_bit_flipped_fails_to_unlock() {
         for (bit, tampered) in every_bit_flip(&replica) {
             folder.put_replica(expected.device_id, tampered);
             assert!(
-                unlock(&folder, vector).is_err(),
+                unlock(&folder, &local, vector).is_err(),
                 "{path}: réplica com o bit {bit} trocado"
             );
         }
         folder.put_replica(expected.device_id, replica);
-        assert!(unlock(&folder, vector).is_ok(), "{path}: original");
+        if let Some(device_key) = local.device_key() {
+            for (bit, tampered) in every_bit_flip(&device_key) {
+                local.put_device_key(tampered);
+                assert!(
+                    unlock(&folder, &local, vector).is_err(),
+                    "{path}: chave do dispositivo com o bit {bit} trocado"
+                );
+            }
+            local.put_device_key(device_key);
+        }
+        assert!(unlock(&folder, &local, vector).is_ok(), "{path}: original");
     }
 }
 
 /// Abre o cofre do vetor com o relógio parado na data em que foi escrito, para
 /// o Lixo do vetor não expirar com o tempo.
-fn open(folder: &MemoryVaultFolder, device_id: &str) -> Result<Vault, VaultError> {
+fn open(
+    folder: &MemoryVaultFolder,
+    local: &MemoryLocalFolder,
+    device_id: &str,
+) -> Result<Vault, VaultError> {
     Vault::open(
         Arc::new(folder.clone()),
+        Arc::new(local.clone()),
         Arc::new(ManualClock::new(VECTORS_WRITTEN_AT_MS)),
         device_id,
     )
 }
 
-fn load(path: &str) -> MemoryVaultFolder {
-    load_vector(&vectors_root().join(path))
+/// A pasta do cofre do vetor e a pasta local do dispositivo que ele descreve.
+fn load(vector: &FormatVector) -> (MemoryVaultFolder, MemoryLocalFolder) {
+    let dir = vectors_root().join(vector.path);
+    let local = load_vector_local_folder(&dir, vector.expected.device_id);
+    (load_vector(&dir), local)
 }
 
-fn unlock(folder: &MemoryVaultFolder, vector: &FormatVector) -> Result<Vault, VaultError> {
-    let vault = open(folder, vector.expected.device_id)?;
+fn unlock(
+    folder: &MemoryVaultFolder,
+    local: &MemoryLocalFolder,
+    vector: &FormatVector,
+) -> Result<Vault, VaultError> {
+    let vault = open(folder, local, vector.expected.device_id)?;
     vault.unlock_with_master_password(vector.master_password)?;
     Ok(vault)
 }

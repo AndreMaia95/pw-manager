@@ -18,9 +18,25 @@ pub enum VaultError {
     /// A réplica está mal formada, não é autêntica ou não pertence a este cofre.
     #[error("réplica rejeitada")]
     ReplicaRejected,
-    /// O chaveiro está mal formado ou não pertence a este cofre.
+    /// O chaveiro está mal formado, não pertence a este cofre, ou não está
+    /// assinado por um dispositivo conhecido com a chave registada dele.
     #[error("chaveiro rejeitado")]
     KeyringRejected,
+    /// A chave deste dispositivo não está na pasta local, e o cofre já é de
+    /// depois das assinaturas: este dispositivo tem de se juntar de novo ao
+    /// cofre.
+    #[error("a chave deste dispositivo não está na pasta local")]
+    DeviceKeyNotFound,
+    /// A chave deste dispositivo, na pasta local, está mal formada ou não é
+    /// deste cofre, deste dispositivo e desta geração.
+    #[error("chave do dispositivo rejeitada")]
+    DeviceKeyRejected,
+    /// Não há nenhum dispositivo conhecido com este id (ou o id nem é válido).
+    #[error("dispositivo não encontrado")]
+    DeviceNotFound,
+    /// Um dispositivo não se pode remover a si próprio.
+    #[error("este dispositivo não se pode remover a si próprio")]
+    CannotRemoveThisDevice,
     /// A réplica ou o chaveiro foram escritos com uma versão principal do
     /// formato mais recente do que a desta app. A app não os lê nem escreve
     /// por cima: tem de ser atualizada (ADR-0008).

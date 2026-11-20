@@ -4,6 +4,10 @@ use std::cmp::Ordering;
 
 use crate::VaultError;
 
+/// A primeira versão secundária da réplica e do chaveiro com assinatura
+/// (ticket 10): os ficheiros 1.0 não são assinados.
+pub(crate) const FIRST_SIGNED_MINOR: u16 = 1;
+
 /// Verifica o início de uma réplica ou de um chaveiro: o identificador do
 /// formato (4 bytes) e a versão principal (u16 BE). Estes 6 bytes ficam no
 /// mesmo sítio em todas as versões, para que uma app antiga reconheça um

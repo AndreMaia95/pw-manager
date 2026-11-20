@@ -3,6 +3,7 @@ mod common;
 use common::{PASSWORD, START_MS, TestEnv};
 use std::sync::Arc;
 
+use vault_core::testing::MemoryLocalFolder;
 use vault_core::{SystemClock, Vault, VaultError};
 
 #[test]
@@ -122,6 +123,7 @@ fn a_keyring_with_bytes_after_its_body_is_rejected() {
 
     let vault = Vault::open(
         Arc::new(env.folder.clone()),
+        Arc::new(MemoryLocalFolder::new()),
         Arc::new(SystemClock),
         &device_id,
     );

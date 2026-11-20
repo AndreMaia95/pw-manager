@@ -29,6 +29,9 @@ O código é escrito em inglês. A coluna **Em código** dá o identificador que
 | **Dispositivo** | Uma instalação da app que escreve a sua própria réplica. | `Device` | cliente, máquina |
 | **Dispositivo conhecido** | Um dispositivo que o utilizador aceitou como seu, num dispositivo conhecido ou entrando com a chave de recuperação; só as réplicas de dispositivos conhecidos entram na fusão. | `KnownDevice` | dispositivo confiável, dispositivo autorizado |
 | **Dispositivo pendente** | Um dispositivo que entrou com a palavra-passe mestra mas ainda não foi aceite; vê o cofre, mas as suas alterações não chegam aos outros. | `PendingDevice` | dispositivo em quarentena, dispositivo novo |
+| **Dispositivo removido** | Um dispositivo conhecido que o utilizador retirou; a marca é definitiva, como uma lápide, e a sua réplica nunca mais entra na fusão. | `KnownDevice::removed`; `Vault::remove_device` | dispositivo apagado, dispositivo revogado |
+| **Chave do dispositivo** | O par de chaves Ed25519 de um dispositivo, com que assina a sua réplica e o chaveiro que escreve; a chave pública vai para a lista de dispositivos conhecidos, a privada fica só na pasta local, cifrada com a chave do cofre. | `DeviceKey` | chave de assinatura, certificado |
+| **Pasta local** | A pasta de um dispositivo fora da pasta do cofre, que nunca é sincronizada: tem a chave do dispositivo. | `LocalFolder` (acedida pela interface `LocalStorage`) | pasta privada, cache |
 | **Réplica** | A cópia do cofre escrita por um único dispositivo; nenhum outro dispositivo escreve nela. | `Replica` | ficheiro do dispositivo, cópia |
 | **Chaveiro** | O ficheiro partilhado na pasta do cofre com os invólucros da palavra-passe mestra e da chave de recuperação. | `Keyring` | keyring, ficheiro de chaves |
 | **Pasta do cofre** | O local partilhado (hoje no iCloud Drive) onde estão as réplicas de todos os dispositivos. | `VaultFolder` (acedida pela interface `Storage`) | pasta de sincronização |

@@ -392,7 +392,7 @@ fn add_tombstone_to_replica(
     replica
         .body
         .extend(tombstones(&[(tombstone_id, deleted, START_MS)]));
-    testing::write_replica(&device.folder, &device_id, PASSWORD, replica).unwrap();
+    testing::write_replica(&device.folder, &device.local, &device_id, PASSWORD, replica).unwrap();
 }
 
 #[test]
