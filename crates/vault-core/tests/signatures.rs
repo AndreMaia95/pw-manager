@@ -641,3 +641,47 @@ fn a_keyring_of_an_older_version_is_rewritten_in_the_current_one_on_unlock() {
     assert_eq!(keyring_signer(&keyring), common::from_hex(device_id));
     assert_eq!(open().unlock_with_master_password(password), Ok(()));
 }
+
+/// Onde está, no cabeçalho do chaveiro, o id de quem escreveu os invólucros.
+const KEYRING_WRITER: std::ops::Range<usize> = 24..40;
+
+/// A confiança no chaveiro vem só de quem o assina, no fim do ficheiro: quem
+/// escreveu os invólucros, no cabeçalho, pode estar removido.
+#[test]
+fn the_keyring_still_opens_on_every_known_device_after_its_envelope_writer_is_removed() {
+    let env = TestEnv::new();
+    let [a, b, c] = [env.device(), env.device(), env.device()];
+    let vault_a = a.create_vault(PASSWORD);
+    let vault_b = b.join_vault(PASSWORD);
+    let vault_c = c.join_vault(PASSWORD);
+    let device_a = vault_a.device_id();
+    vault_b.merge().unwrap();
+
+    vault_b.remove_device(&device_a).unwrap();
+    // C funde e fica a saber que A, que escreveu os invólucros, foi removido.
+    vault_c.merge().unwrap();
+
+    let keyring = env.folder.keyring().unwrap();
+    assert_eq!(keyring[KEYRING_WRITER], common::from_hex(&device_a));
+    assert_eq!(
+        keyring_signer(&keyring),
+        common::from_hex(&vault_b.device_id())
+    );
+    for (device, id) in [(&b, vault_b.device_id()), (&c, vault_c.device_id())] {
+        let reopened = device.open_vault(&id);
+        assert_eq!(
+            reopened.unlock_with_master_password(PASSWORD),
+            Ok(()),
+            "{id}"
+        );
+        assert_eq!(
+            reopened.merge().unwrap().skipped,
+            skipped(&device_a, SkipReason::RemovedDevice)
+        );
+    }
+    let joined = env.device().join_vault(PASSWORD);
+    assert_eq!(
+        joined.merge().unwrap().skipped,
+        skipped(&device_a, SkipReason::RemovedDevice)
+    );
+}
