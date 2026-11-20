@@ -38,6 +38,11 @@ pub enum VaultError {
     /// dispositivos: este está pendente ou foi removido.
     #[error("este dispositivo não é um dispositivo conhecido")]
     ThisDeviceNotKnown,
+    /// Este dispositivo foi removido do cofre, ou recusado quando estava
+    /// pendente, segundo a réplica de um dispositivo conhecido. Já não escreve
+    /// a sua réplica nem desbloqueia: tem de se juntar de novo ao cofre.
+    #[error("este dispositivo foi removido do cofre")]
+    ThisDeviceRemoved,
     /// A impressão digital confirmada não é a da chave com que o dispositivo
     /// pendente se descreve agora na pasta do cofre: pode ser outro
     /// dispositivo a fazer-se passar por ele.

@@ -228,7 +228,8 @@ fn refusing_a_pending_device_keeps_its_replica_out_of_the_merge_for_good() {
     vault_b.create_entry(entry("Correio")).unwrap();
     let report_a = vault_a.merge().unwrap();
     let report_c = vault_c.merge().unwrap();
-    vault_b.merge().unwrap();
+    let replica_b = env.folder.replica(&device_b);
+    let merged_b = vault_b.merge();
 
     assert!(replica_deleted);
     assert_eq!(
@@ -241,7 +242,17 @@ fn refusing_a_pending_device_keeps_its_replica_out_of_the_merge_for_good() {
     );
     assert!(titles(&vault_a).is_empty());
     assert!(titles(&vault_c).is_empty());
+    // B escreveu a sua réplica depois de recusado, antes de o saber; ao
+    // saber, deixa de a escrever, e já não desbloqueia.
+    assert_eq!(merged_b, Err(VaultError::ThisDeviceRemoved));
     assert_eq!(vault_b.device_status(), Ok(DeviceStatus::Removed));
+    assert!(replica_b.is_some());
+    assert_eq!(env.folder.replica(&device_b), replica_b);
+    assert_eq!(
+        b.open_vault(&device_b)
+            .unlock_with_master_password(PASSWORD),
+        Err(VaultError::ThisDeviceRemoved)
+    );
     assert_eq!(
         vault_c.accept_device(&device_b, &fingerprint_b),
         Err(VaultError::DeviceRemoved)
@@ -289,8 +300,32 @@ fn removing_a_device_marks_it_removed_and_deletes_its_replica_from_the_vault_fol
     let listed = vault_a.known_devices().unwrap();
     let removed = listed.iter().find(|device| device.device_id == device_b);
     assert!(removed.is_some_and(|device| device.removed));
+}
+
+#[test]
+fn a_device_that_learns_it_was_removed_stops_writing_its_replica_and_cannot_unlock() {
+    let env = TestEnv::new();
+    let [a, b] = [env.device(), env.device()];
+    let vault_a = a.create_vault(PASSWORD);
+    let vault_b = b.join_vault_accepted_by(PASSWORD, &vault_a);
     vault_b.merge().unwrap();
+    let device_b = vault_b.device_id();
+    vault_a.remove_device(&device_b).unwrap();
+
+    let merged = vault_b.merge();
+    let edited = vault_b.create_entry(entry("Loja"));
+    let saved = vault_b.save_replica();
+
+    assert_eq!(merged, Err(VaultError::ThisDeviceRemoved));
+    assert_eq!(edited, Err(VaultError::ThisDeviceRemoved));
+    assert_eq!(saved, Err(VaultError::ThisDeviceRemoved));
     assert_eq!(vault_b.device_status(), Ok(DeviceStatus::Removed));
+    assert_eq!(env.folder.replica_device_ids(), [vault_a.device_id()]);
+    assert_eq!(
+        b.open_vault(&device_b)
+            .unlock_with_master_password(PASSWORD),
+        Err(VaultError::ThisDeviceRemoved)
+    );
 }
 
 #[test]

@@ -8,12 +8,16 @@
 //! fusão do que viu: o corpo decifrado tem de ser igual, byte a byte, seja qual
 //! for a ordem e quantas vezes cada réplica entrou.
 //!
+//! Os três também aceitam, recusam e removem dois dispositivos pendentes, e
+//! dão nomes a dispositivos (ticket 11): a lista de dispositivos conhecidos
+//! faz parte do corpo comparado, e a ordem e a repetição da fusão também não
+//! a podem mudar.
+//!
 //! Desde a quarentena (ticket 11), só entram réplicas de dispositivos
 //! aceites. Por isso o cofre é criado por um dispositivo raiz, que não edita
 //! nada e aceita os três e dois observadores; cada observador desbloqueia
 //! sobre uma pasta com o chaveiro, a réplica da raiz e a sua, sem entradas,
-//! e funde a da raiz em todas as fusões. A comparação deixa de fora da lista
-//! de dispositivos conhecidos a raiz e os observadores.
+//! e funde a da raiz em todas as fusões.
 
 mod common;
 
@@ -22,9 +26,11 @@ use std::sync::Arc;
 use common::{PASSWORD, START_MS, TestDevice, TestEnv};
 use proptest::prelude::*;
 use vault_core::testing::{self, ManualClock, MemoryLocalFolder, MemoryVaultFolder};
-use vault_core::{EntryChanges, EntryFields, SecretField, Vault};
+use vault_core::{EntryChanges, EntryFields, SecretField, SkipReason, Vault};
 
 const DEVICES: usize = 3;
+/// Os dispositivos pendentes que os três podem aceitar, recusar e remover.
+const PENDING: usize = 2;
 const MINUTE_MS: i64 = 60_000;
 const DAY_MS: i64 = 24 * 60 * MINUTE_MS;
 /// A hora dos observadores: anterior a todas as edições, para que nada expire
@@ -41,7 +47,9 @@ const LAST_ROUND_AT_MS: i64 = START_MS + 90 * DAY_MS;
 /// Uma operação de um dispositivo. `entry` e `version` escolhem, pelo resto
 /// da divisão, uma das entradas criadas por qualquer dispositivo e uma versão
 /// do histórico; uma entrada que o dispositivo ainda não conhece dá erro, que
-/// se ignora.
+/// se ignora. `pending` escolhe um dos dispositivos pendentes, e `named` um
+/// dos três ou dos pendentes; o que o dispositivo não pode fazer (aceitar um
+/// recusado, remover quem não conhece, …) dá erro, que se ignora.
 #[derive(Debug, Clone)]
 enum Op {
     Create(usize),
@@ -53,6 +61,10 @@ enum Op {
     Restore(usize, usize, usize),
     Merge(usize),
     Clock(usize, i64),
+    Accept(usize, usize),
+    Refuse(usize, usize),
+    Remove(usize, usize),
+    Name(usize, usize),
 }
 
 fn op() -> impl Strategy<Value = Op> {
@@ -76,7 +88,11 @@ fn op() -> impl Strategy<Value = Op> {
         1 => device.clone().prop_map(Op::EmptyTrash),
         1 => (device.clone(), entry, any::<usize>()).prop_map(|(d, e, v)| Op::Restore(d, e, v)),
         4 => device.clone().prop_map(Op::Merge),
-        3 => (device, clock).prop_map(|(d, ms)| Op::Clock(d, ms)),
+        3 => (device.clone(), clock).prop_map(|(d, ms)| Op::Clock(d, ms)),
+        2 => (device.clone(), 0..PENDING).prop_map(|(d, p)| Op::Accept(d, p)),
+        1 => (device.clone(), 0..PENDING).prop_map(|(d, p)| Op::Refuse(d, p)),
+        1 => (device.clone(), 0..PENDING).prop_map(|(d, p)| Op::Remove(d, p)),
+        2 => (device, 0..DEVICES + PENDING).prop_map(|(d, t)| Op::Name(d, t)),
     ]
 }
 
@@ -97,7 +113,11 @@ impl Op {
             | Op::EmptyTrash(d)
             | Op::Restore(d, _, _)
             | Op::Merge(d)
-            | Op::Clock(d, _) => d,
+            | Op::Clock(d, _)
+            | Op::Accept(d, _)
+            | Op::Refuse(d, _)
+            | Op::Remove(d, _)
+            | Op::Name(d, _) => d,
         }
     }
 }
@@ -106,8 +126,15 @@ impl Op {
 /// chaveiro e as réplicas, os dispositivos e os dois observadores.
 struct Edited {
     env: TestEnv,
+    root_id: String,
     devices: Vec<(TestDevice, Vault)>,
     observers: [ObserverDevice; 2],
+}
+
+/// Um dispositivo pendente: o seu id e a impressão digital que mostra.
+struct PendingDevice {
+    device_id: String,
+    fingerprint: String,
 }
 
 /// Um observador aceite pela raiz: o seu id e a sua pasta local.
@@ -133,6 +160,15 @@ fn run(ops: &[(Op, i64)]) -> Edited {
             local: device.local,
         }
     });
+    let pending = [(); PENDING].map(|_| {
+        let vault = env.device().join_vault(PASSWORD);
+        PendingDevice {
+            device_id: vault.device_id(),
+            fingerprint: vault.device_fingerprint().unwrap(),
+        }
+    });
+    let pending_ids: Vec<&str> = pending.iter().map(|p| p.device_id.as_str()).collect();
+    let device_ids: Vec<String> = devices.iter().map(|(_, vault)| vault.device_id()).collect();
     let mut ids: Vec<String> = Vec::new();
     for (n, (op, elapsed_ms)) in ops.iter().enumerate() {
         let pick = |entry: usize| ids.get(entry % ids.len().max(1)).cloned();
@@ -183,14 +219,39 @@ fn run(ops: &[(Op, i64)]) -> Edited {
                 }
             }
             Op::Merge(d) => {
+                // Só ficam de fora as réplicas dos pendentes que este ainda
+                // não sabe aceites: a de um recusado ou removido foi apagada.
                 let report = devices[d].1.merge().unwrap();
-                assert_eq!(report.skipped, vec![]);
+                for skipped in report.skipped {
+                    assert!(pending_ids.contains(&skipped.device_id.as_str()));
+                    assert_eq!(skipped.reason, SkipReason::Quarantined);
+                }
             }
             Op::Clock(d, ms) => devices[d].0.clock.advance(ms),
+            Op::Accept(d, p) => {
+                let pending = &pending[p];
+                let _ = devices[d]
+                    .1
+                    .accept_device(&pending.device_id, &pending.fingerprint);
+            }
+            Op::Refuse(d, p) => {
+                let _ = devices[d].1.refuse_device(&pending[p].device_id);
+            }
+            Op::Remove(d, p) => {
+                let _ = devices[d].1.remove_device(&pending[p].device_id);
+            }
+            Op::Name(d, t) => {
+                let named = match t < DEVICES {
+                    true => &device_ids[t],
+                    false => &pending[t - DEVICES].device_id,
+                };
+                let _ = devices[d].1.set_device_name(named, &format!("nome {n}"));
+            }
         }
     }
     Edited {
         env,
+        root_id: root.device_id(),
         devices,
         observers,
     }
@@ -210,7 +271,7 @@ impl Edited {
         let folder = MemoryVaultFolder::new();
         folder.put_keyring(self.env.folder.keyring().unwrap());
         let observer = &self.observers[o];
-        for device_id in [&self.root_id(), &observer.device_id] {
+        for device_id in [&self.root_id, &observer.device_id] {
             folder.put_replica(device_id, self.env.folder.replica(device_id).unwrap());
         }
         let vault = Vault::open(
@@ -226,23 +287,6 @@ impl Edited {
             observer.merge_in(replica);
         }
         observer
-    }
-
-    /// O id da raiz, que criou o cofre e não edita nada.
-    fn root_id(&self) -> String {
-        let mut others = self.device_ids();
-        others.extend(self.observers.iter().map(|o| o.device_id.clone()));
-        let replicas = self.env.folder.replica_device_ids();
-        let root = replicas.into_iter().find(|id| !others.contains(id));
-        root.expect("a réplica da raiz")
-    }
-
-    /// Os ids dos dispositivos que editaram.
-    fn device_ids(&self) -> Vec<String> {
-        self.devices
-            .iter()
-            .map(|(_, vault)| vault.device_id())
-            .collect()
     }
 }
 
@@ -260,10 +304,14 @@ struct Observer {
 }
 
 impl Observer {
+    /// Funde `replica`, e só essa além da da raiz: depois de fundida, sai da
+    /// pasta. Se as réplicas ficassem, cada fusão voltaria a fundir todas
+    /// pela ordem do id, e a ordem dada deixava de contar.
     fn merge_in(&self, replica: &Replica) {
         self.folder
             .put_replica(&replica.device_id, replica.bytes.clone());
         let report = self.vault.merge().unwrap();
+        self.folder.delete_replica(&replica.device_id);
         assert_eq!(report.skipped, vec![]);
     }
 
@@ -273,21 +321,23 @@ impl Observer {
         Replica { device_id, bytes }
     }
 
-    /// O corpo decifrado da réplica do observador: o estado que fundiu, só
-    /// com os dispositivos `devices` (os que editaram) na lista de
-    /// dispositivos conhecidos, sem a raiz nem os observadores.
-    fn body(&self, devices: &[String]) -> Vec<u8> {
-        let body = testing::open_replica(&self.folder, &self.vault.device_id(), PASSWORD)
+    /// O corpo decifrado da réplica do observador, com a lista de
+    /// dispositivos conhecidos: o estado que fundiu.
+    fn body(&self) -> Vec<u8> {
+        testing::open_replica(&self.folder, &self.vault.device_id(), PASSWORD)
             .unwrap()
-            .body;
-        testing::body_keeping_devices(&body, devices).unwrap()
+            .body
     }
 }
 
 /// Tudo o que a API pública mostra do cofre: as entradas e o Lixo, com os
-/// segredos, o histórico e os ajustes do gerador.
+/// segredos, o histórico e os ajustes do gerador, e a lista de dispositivos
+/// conhecidos.
 fn observable(vault: &Vault) -> String {
     let mut state = String::new();
+    for device in vault.known_devices().unwrap() {
+        state += &format!("{device:?}\n");
+    }
     let mut entries = vault.list_entries().unwrap();
     entries.extend(vault.list_trash().unwrap());
     for entry in entries {
@@ -326,8 +376,7 @@ proptest! {
         let ab = edited.observer(0, &[&a, &b]);
         let ba = edited.observer(0, &[&b, &a]);
 
-        let devices = edited.device_ids();
-        prop_assert_eq!(ab.body(&devices), ba.body(&devices));
+        prop_assert_eq!(ab.body(), ba.body());
         prop_assert_eq!(observable(&ab.vault), observable(&ba.vault));
     }
 
@@ -340,8 +389,7 @@ proptest! {
         let bc = edited.observer(1, &[&b, &c]);
         let a_bc = edited.observer(0, &[&a, &bc.replica()]);
 
-        let devices = edited.device_ids();
-        prop_assert_eq!(ab_c.body(&devices), a_bc.body(&devices));
+        prop_assert_eq!(ab_c.body(), a_bc.body());
     }
 
     #[test]
@@ -349,16 +397,15 @@ proptest! {
         let edited = run(&ops);
         let (a, b) = (edited.replica(0), edited.replica(1));
 
-        let devices = edited.device_ids();
         let ab = edited.observer(0, &[&a, &b]);
-        let merged = ab.body(&devices);
+        let merged = ab.body();
         ab.merge_in(&a);
         ab.merge_in(&b);
-        prop_assert_eq!(ab.body(&devices), merged.clone());
+        prop_assert_eq!(ab.body(), merged.clone());
 
         // A fusão com o próprio resultado não o muda.
         let again = edited.observer(1, &[&ab.replica(), &a, &b]);
-        prop_assert_eq!(again.body(&devices), merged);
+        prop_assert_eq!(again.body(), merged);
     }
 
     /// Todos os dispositivos fundem à mesma hora, duas rondas: uma entrada que

@@ -206,6 +206,12 @@ impl Vault {
     /// conhecido e não removido. Só depois se compara a geração do chaveiro
     /// com a da réplica e a da chave.
     ///
+    /// Se as réplicas dos dispositivos que este conhece o marcam como removido
+    /// (ou recusado), dá [`VaultError::ThisDeviceRemoved`]: a sua própria
+    /// réplica não o diz, porque deixou de a escrever ao sabê-lo, ou foi
+    /// apagada por quem o removeu. Sem a sua réplica, as dos outros lêem-se a
+    /// partir da de quem assinou o chaveiro, como ao juntar-se.
+    ///
     /// Um chaveiro de uma versão do formato anterior é reescrito na versão
     /// atual, com um invólucro novo da mesma palavra-passe mestra, assinado
     /// por este dispositivo, se for um dispositivo conhecido; se a escrita
@@ -223,10 +229,13 @@ impl Vault {
         let same_device = |other: &ReplicaOwner| {
             other.vault_id == owner.vault_id && other.device_id == owner.device_id
         };
-        let bytes = self
-            .storage
-            .read_replica(self.device_id())?
-            .ok_or(VaultError::ReplicaNotFound)?;
+        let Some(bytes) = self.storage.read_replica(self.device_id())? else {
+            // Quem remove um dispositivo apaga a réplica dele.
+            return match self.removed_without_replica(&keyring, &vault_key)? {
+                true => Err(VaultError::ThisDeviceRemoved),
+                false => Err(VaultError::ReplicaNotFound),
+            };
+        };
         let sealed = SealedReplica::parse(&bytes)?;
         if !same_device(&sealed.owner()) {
             return Err(VaultError::ReplicaRejected);
@@ -268,6 +277,11 @@ impl Vault {
             None if sealed.owner() != owner => return Err(VaultError::ReplicaRejected),
             None => self.migrate_to_signatures(&keyring, &sealed, vault_key, master_password)?,
         };
+        // A réplica deste dispositivo não diz que foi removido, porque deixou
+        // de a escrever quando o soube: dizem-no as dos que ele conhece.
+        if self.removed_by_known_devices(&session)? {
+            return Err(VaultError::ThisDeviceRemoved);
+        }
         // Só um dispositivo conhecido assina o chaveiro: um assinado por um
         // pendente seria rejeitado pelos outros.
         if !keyring.is_current_version() && self.is_known(&session.body) {
@@ -281,6 +295,37 @@ impl Vault {
         }
         *self.session() = Some(session);
         Ok(())
+    }
+
+    /// As réplicas dos dispositivos que o estado de `session` conhece marcam
+    /// este dispositivo como removido.
+    fn removed_by_known_devices(&self, session: &Session) -> Result<bool, VaultError> {
+        let merged = self.merge_other_replicas(
+            &session.vault_key,
+            session.generation,
+            Some(session.body.clone()),
+            None,
+        )?;
+        Ok(merged.body.is_some_and(|body| self.is_removed(&body)))
+    }
+
+    /// Sem a réplica deste dispositivo, as réplicas dos outros marcam-no como
+    /// removido. Lidas como ao juntar-se ao cofre: a partir da réplica de quem
+    /// assinou o chaveiro, e só se o chaveiro estiver assinado por um
+    /// dispositivo conhecido delas.
+    fn removed_without_replica(
+        &self,
+        keyring: &Keyring,
+        vault_key: &SecretKey,
+    ) -> Result<bool, VaultError> {
+        let merged =
+            self.merge_other_replicas(vault_key, keyring.generation(), None, keyring.signer())?;
+        Ok(merged.body.is_some_and(|body| {
+            let signer_known = keyring
+                .verify(|id| devices::signing_public_key(&body.devices, id))
+                .is_ok();
+            signer_known && self.is_removed(&body)
+        }))
     }
 
     /// Escreve o chaveiro na versão atual do formato, com um invólucro novo da
@@ -533,6 +578,11 @@ impl Vault {
         devices::status(&body.devices, self.device_id) == DeviceStatus::Known
     }
 
+    /// Este dispositivo está removido (ou foi recusado) em `body`.
+    fn is_removed(&self, body: &ReplicaBody) -> bool {
+        devices::status(&body.devices, self.device_id) == DeviceStatus::Removed
+    }
+
     /// Quando o cofre foi criado, em milissegundos desde 1970-01-01T00:00:00Z.
     pub fn created_at_ms(&self) -> Result<i64, VaultError> {
         let session = self.session();
@@ -729,6 +779,10 @@ impl Vault {
     /// este não conhece fica em quarentena ([`SkipReason::Quarantined`]): a de
     /// um dispositivo pendente entra depois de ele ser aceite. Se a escrita da
     /// réplica falhar, o estado fica como estava.
+    ///
+    /// Se uma réplica que entra marca este dispositivo como removido (ou
+    /// recusado), o estado fundido fica em memória, mas a réplica não é
+    /// escrita, nem agora nem depois, e dá [`VaultError::ThisDeviceRemoved`].
     pub fn merge(&self) -> Result<MergeReport, VaultError> {
         let mut session = self.session();
         let session = session.as_mut().ok_or(VaultError::Locked)?;
@@ -739,6 +793,11 @@ impl Vault {
             None,
         )?;
         let mut body = merged.body.expect("a fusão parte do estado atual");
+        if self.is_removed(&body) {
+            // Fica a saber em memória, mas não escreve a réplica.
+            session.body = body;
+            return Err(VaultError::ThisDeviceRemoved);
+        }
         // Uma entrada vinda de outra réplica pode já ter expirado no Lixo.
         body.expire_trash(self.clock.now_ms());
         if body != session.body || session.unsaved {
@@ -887,7 +946,12 @@ impl Vault {
         })
     }
 
+    /// Um dispositivo removido nunca escreve a sua réplica: dá
+    /// [`VaultError::ThisDeviceRemoved`].
     fn write_replica(&self, session: &Session, body: &ReplicaBody) -> Result<(), VaultError> {
+        if self.is_removed(body) {
+            return Err(VaultError::ThisDeviceRemoved);
+        }
         let bytes = replica::seal(
             &self.owner(session.generation),
             &session.vault_key,

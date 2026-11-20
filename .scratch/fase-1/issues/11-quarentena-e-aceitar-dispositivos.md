@@ -34,8 +34,8 @@
 - Testes de propriedades: os observadores já não se juntam com uma réplica qualquer. Um dispositivo raiz cria o cofre e aceita os três que editam e dois observadores; cada observador desbloqueia numa pasta com o chaveiro, a réplica da raiz e a sua.
 - Fuzzing curto local: `replica`, `replica_body` e `merge` (45 s cada), sem falhas.
 - Ficam da revisão, por decidir:
-  - Um dispositivo removido ou recusado volta a escrever a sua réplica, que fica na pasta (sempre de fora da fusão, com alerta `RemovedDevice`), até saber que foi removido e mesmo depois. Deixar de escrever a réplica quando se sabe removido seria o passo seguinte.
-  - Os testes de propriedades não fazem operações sobre dispositivos (aceitar, recusar, remover, dar nome): as regras novas de fusão da lista (nome pelo carimbo, primeira data de aceitação, pendentes, chave de um removido) não estão cobertas por eles.
+  - (Resolvido, ver o acrescento.) Um dispositivo removido ou recusado volta a escrever a sua réplica, que fica na pasta (sempre de fora da fusão, com alerta `RemovedDevice`), até saber que foi removido e mesmo depois. Deixar de escrever a réplica quando se sabe removido seria o passo seguinte.
+  - (Resolvido, ver o acrescento.) Os testes de propriedades não fazem operações sobre dispositivos (aceitar, recusar, remover, dar nome): as regras novas de fusão da lista (nome pelo carimbo, primeira data de aceitação, pendentes, chave de um removido) não estão cobertas por eles.
   - Um recusado a partir de uma réplica trocada pode mostrar na lista a impressão digital da chave trocada (fica a maior das chaves).
   - `set_device_name` aceita dar nome a um dispositivo removido.
 - Decisões a confirmar:
@@ -44,4 +44,11 @@
   - Aceitar não funde logo: a réplica do aceite entra na fusão seguinte.
   - O nome dado por um pendente depois de já ter sido aceite (mas antes de o saber) perde-se: fica o que quem o aceitou copiou.
   - A forma de entrada (palavra-passe mestra ou chave de recuperação) fica para o ticket 13.
+
+**Acrescento (2026-11-20), decisões do utilizador.** O ticket fica `done`. As outras decisões a confirmar ficam como estão. Mudou:
+
+- Um dispositivo que vê, na réplica de um dispositivo conhecido, que foi removido (ou recusado) deixa de escrever a sua réplica: a fusão, as edições e `save_replica` dão `VaultError::ThisDeviceRemoved`. O estado fundido fica em memória, e `device_status` dá `Removed`. O desbloqueio também dá `ThisDeviceRemoved`, pelas réplicas dos dispositivos que ele conhece, porque a sua já não o diz. Se a sua réplica já foi apagada por quem o removeu, lê as dos outros a partir da de quem assinou o chaveiro, como ao juntar-se, e só se o chaveiro estiver assinado por um dispositivo conhecido delas. Testes em `tests/devices.rs`, com a réplica apagada e com a réplica ainda na pasta.
+- Os testes de propriedades da fusão incluem agora aceitar, recusar e remover dois dispositivos pendentes e dar nome a dispositivos. O corpo comparado já não deixa nada de fora da lista de dispositivos, e o estado observável inclui `known_devices`. `testing::body_keeping_devices` deixou de ser preciso e saiu.
+- Encontrado ao fazê-lo: a pasta de cada observador acumulava as réplicas já fundidas, e cada fusão voltava a fundir todas pela ordem do id. Assim, "a depois b" e "b depois a" davam sempre o mesmo, mesmo com uma fusão que dependesse da ordem. A fraqueza vinha do ticket 09 e valia também para as entradas. Agora cada observador funde só a réplica que recebe, além da da raiz. Verificado com duas mutações em `KnownDevice::merge`: o nome fica sempre o da outra réplica, e a marca de removido deixa de ser definitiva. Ambas fazem falhar a comutatividade; antes da correção, a primeira passava.
+- Na nota do ticket 28: a app chama `merge()` logo a seguir a aceitar.
 

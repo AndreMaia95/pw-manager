@@ -15,7 +15,7 @@ use crate::crypto::{self, NONCE_LEN, SecretKey};
 use crate::device_key::{DeviceKey, SIGNATURE_LEN};
 use crate::format_version::FIRST_SIGNED_MINOR;
 use crate::keyring::Keyring;
-use crate::replica::{self, HEADER_LEN, NONCE_OFFSET, SIGNATURE_LABEL};
+use crate::replica::{HEADER_LEN, NONCE_OFFSET, SIGNATURE_LABEL};
 use crate::{Clock, LocalStorage, Storage, StorageError, VaultError};
 
 /// Uma pasta do cofre em memória. Os clones partilham o mesmo conteúdo, por isso
@@ -358,16 +358,6 @@ pub fn device_public_key(
 ) -> Result<Vec<u8>, VaultError> {
     let vault_key = vault_key(folder, master_password)?;
     Ok(device_key(local, &vault_key)?.public_key().to_vec())
-}
-
-/// O corpo de uma réplica decifrada só com os dispositivos `device_ids` na
-/// lista de dispositivos conhecidos, para comparar o que fundiram dispositivos
-/// diferentes, que se conhecem a si próprios. `None` se o corpo não se ler.
-pub fn body_keeping_devices(body: &[u8], device_ids: &[String]) -> Option<Vec<u8>> {
-    let mut body = replica::decode_body(body).ok()?;
-    body.devices
-        .retain(|id, _| device_ids.contains(&id.to_string()));
-    Some(replica::encode_body(&body).to_vec())
 }
 
 /// A versão do formato no cabeçalho de uma réplica tem assinatura.
